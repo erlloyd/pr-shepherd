@@ -1,87 +1,134 @@
 # PR Shepherd
 
-Automated PR lifecycle management for AI coding agents. Monitors pull requests, relays CI failures and review feedback to worker agents, requests peer reviews, and enables auto-merge — so humans only need to write code and review code. Also watches for incoming review assignments and automatically notifies your AI assistant to dispatch review workers.
+Automated PR lifecycle management for AI coding agents. Watches GitHub for your open pull requests and incoming review assignments, detects state transitions (CI pass/fail, reviews, merges), and routes actionable information to a designated agent — so humans only need to write code and review code.
+
+No registration needed. The daemon discovers your PRs from GitHub automatically.
 
 ## How It Works
 
-Four components:
+Two watch loops run on a configurable interval (default: 3 minutes):
 
-1. **Polling daemon** — runs in a background tmux pane, polls GitHub every 3 minutes via `gh` CLI, detects state transitions, and notifies the shepherd agent. Zero AI tokens consumed.
+1. **Authored PR monitoring** — polls GitHub for open non-draft PRs by a configured author. For each PR, checks CI status, reviews, and merge state. On state transitions:
+   - **CI fails** → sends failure details to your notify agent
+   - **Reviewer requests changes** → sends the full review body to your notify agent
+   - **All approvals received** → enables auto-merge via `gh pr merge --auto --squash`
+   - **PR goes stale** (no review activity past threshold) → sends a stale notice
+   - **PR merges or closes** → cleans up state cache, sends confirmation
 
-2. **Shepherd agent** — a Claude Code (or any AI) instance that handles the intelligent work. Activated only on state transitions: summarizes CI failures, relays review feedback, enables auto-merge, posts to chat for review requests.
+2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Sends new assignments to your notify agent.
 
-3. **Registration protocol** — workers register PRs via CLI or by writing to `pr-tracking.json`. The daemon picks them up. PRs are removed on merge or close.
-
-4. **Review inbox** — watches for PRs where you've been requested as a reviewer (by bots or humans). When a new non-draft assignment is detected, automatically notifies your AI assistant to dispatch a worker for review. You read the review report and decide what to post.
-
-## Quick Start
-
-```bash
-git clone <repo-url> pr-shepherd
-cd pr-shepherd
-npm install
-npm run build
-
-# Add a PR to track
-pr-shepherd add https://github.com/your-org/your-repo/pull/123 --worker my-agent
-
-# Start the daemon
-pr-shepherd start
-
-# Check status
-pr-shepherd list
-pr-shepherd events
-```
+**Communication:** All messages are sent via an [Agent Conductor](https://github.com/your-org/agent-conductor) MCP server using `send_to_agent`. If no conductor is configured, messages are logged to stdout instead. The daemon itself consumes zero AI tokens — it's pure Node.js polling.
 
 ## Prerequisites
 
 - **Node.js 22+**
 - **GitHub CLI (`gh`)** — authenticated (`gh auth login`)
-- **tmux** — for daemon ↔ agent communication
+- **Agent Conductor** (optional) — for routing messages to other agents
+
+## Quick Start
+
+### 1. Clone and install
+
+```bash
+git clone <repo-url> pr-shepherd
+cd pr-shepherd
+npm install
+```
+
+### 2. Create your config
+
+```bash
+cp config/shepherd.example.json shepherd.config.json
+```
+
+Edit `shepherd.config.json` — at minimum you need:
+
+```json
+{
+  "github": {
+    "authorUsername": "your-github-username"
+  },
+  "notifications": {
+    "notifyAgent": "your-assistant-agent"
+  }
+}
+```
+
+### 3. Set up environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` — set `PR_SHEPHERD_CONDUCTOR_URL` if you're using a conductor:
+
+```bash
+PR_SHEPHERD_CONDUCTOR_URL=http://localhost:3456
+```
+
+### 4. Register with the conductor (if using one)
+
+Create an agent config for pr-shepherd in your conductor's `config/agents/` directory:
+
+```yaml
+# config/agents/pr-shepherd.yaml
+agent: pr-shepherd
+codename: pr-shepherd
+repo: /path/to/pr-shepherd
+model: claude-sonnet-4-6
+maxTurns: 10
+```
+
+The conductor will create an MCP endpoint at `/mcp/pr-shepherd` that the daemon uses to send messages. The conductor hot-reloads agent configs, so it should pick this up within 5 minutes — or restart the conductor to load it immediately.
+
+### 5. Start
+
+```bash
+make start          # Start the daemon
+make start-dry      # Start in dry-run mode (logs only, no messages sent)
+```
+
+Or without make:
+
+```bash
+npx tsx src/index.ts start
+npx tsx src/index.ts start --dry-run
+```
+
+### 6. Check on things
+
+```bash
+make status         # Show watched PRs and their states
+make events         # Show event audit log
+make inbox          # Show pending review assignments
+```
+
+## Running Without a Conductor
+
+PR Shepherd works without an agent conductor. If `PR_SHEPHERD_CONDUCTOR_URL` is not set (or `agent.conductorUrl` is null in config), messages are logged to stdout instead of being routed to agents. This is useful for:
+
+- **Testing** — run `make start-dry` to see what the daemon would do
+- **Simple setups** — pipe stdout to a log file or monitoring tool
+- **Integration with other systems** — parse the structured log output
+
+You can also set `notifications.webhookUrl` to send notifications to a Slack/Discord/Teams incoming webhook independently of the conductor.
 
 ## Configuration
 
-PR Shepherd is configured through three layers (in priority order):
+Three layers, in priority order:
 
-1. **CLI flags** — `--dry-run`, `--interval`, etc.
-2. **Environment variables** — `PR_SHEPHERD_*`
+1. **CLI flags** — `--dry-run`, `--interval`, `-c <path>`
+2. **Environment variables** — `PR_SHEPHERD_*` (see `.env.example`)
 3. **Config file** — `shepherd.config.json` in the working directory
 
-### Environment Variables
+### Required Configuration
 
-```bash
-# Where tracking + event files live (default: ./data)
-PR_SHEPHERD_DATA_DIR=./data
+| Key | Env var | Description |
+|-----|---------|-------------|
+| `github.authorUsername` | `PR_SHEPHERD_AUTHOR_USERNAME` | GitHub username whose PRs to watch |
+| `notifications.notifyAgent` | `PR_SHEPHERD_NOTIFY_AGENT` | Agent codename to send all PR issues to |
 
-# GitHub token — only needed if not using gh CLI auth
-GITHUB_TOKEN=
-
-# Chat notifications — Slack/Discord/Teams incoming webhook URL
-PR_SHEPHERD_WEBHOOK_URL=https://hooks.slack.com/services/...
-
-# Conductor MCP server URL for agent-to-agent messaging
-PR_SHEPHERD_CONDUCTOR_URL=http://localhost:3456
-
-# Tmux target pane for the shepherd agent
-PR_SHEPHERD_TMUX_PANE=shepherd
-
-# Convenience overrides
-PR_SHEPHERD_POLL_INTERVAL=180
-PR_SHEPHERD_STALE_HOURS=4
-PR_SHEPHERD_REQUIRED_APPROVALS=1
-PR_SHEPHERD_DRY_RUN=false
-PR_SHEPHERD_DEFAULT_REPO=your-org/your-repo
-
-# Review inbox — auto-detect incoming review assignments
-PR_SHEPHERD_REVIEW_INBOX_ENABLED=true
-PR_SHEPHERD_REVIEW_INBOX_USER=your-github-username
-PR_SHEPHERD_REVIEW_INBOX_AGENT=your-assistant-agent
-PR_SHEPHERD_REVIEW_INBOX_PANE=
-```
-
-### Config File
-
-Copy `config/shepherd.example.json` to `shepherd.config.json` and edit:
+### Full Config Reference
 
 ```json
 {
@@ -89,9 +136,11 @@ Copy `config/shepherd.example.json` to `shepherd.config.json` and edit:
   "staleThresholdHours": 4,
   "requiredApprovals": 1,
   "mergeStrategy": "squash",
+  "dryRun": false,
 
   "github": {
-    "defaultRepo": "your-org/your-repo"
+    "defaultRepo": null,
+    "authorUsername": "your-github-username"
   },
 
   "reviews": {
@@ -104,8 +153,15 @@ Copy `config/shepherd.example.json` to `shepherd.config.json` and edit:
     "ignoreChecks": ["optional-deploy-preview"]
   },
 
+  "agent": {
+    "conductorUrl": "http://localhost:3456",
+    "shepherdPane": null
+  },
+
   "notifications": {
-    "channel": "pr-reviews",
+    "webhookUrl": null,
+    "channel": null,
+    "notifyAgent": "your-assistant-agent",
     "onMerge": true,
     "onCIFailure": true,
     "onStale": true,
@@ -116,8 +172,10 @@ Copy `config/shepherd.example.json` to `shepherd.config.json` and edit:
     "enabled": true,
     "githubUser": "your-github-username",
     "notifyAgent": "your-assistant-agent",
+    "notifyPane": null,
     "ignoreRepos": [],
-    "ignoreDrafts": true
+    "ignoreDrafts": true,
+    "maxAgeDays": 5
   }
 }
 ```
@@ -126,48 +184,63 @@ Copy `config/shepherd.example.json` to `shepherd.config.json` and edit:
 |-----|---------|-------------|
 | `pollIntervalSeconds` | 180 | How often to poll GitHub (minimum 10) |
 | `staleThresholdHours` | 4 | Hours before a PR is considered stale |
-| `requiredApprovals` | 1 | Number of approvals needed before auto-merge |
-| `mergeStrategy` | "squash" | Merge method: squash, merge, or rebase |
+| `requiredApprovals` | 1 | Approvals needed before auto-merge |
+| `mergeStrategy` | "squash" | Merge method: `squash`, `merge`, or `rebase` |
 | `dryRun` | false | Log actions without executing them |
-| `reviews.ignoreUsers` | [] | GitHub usernames whose reviews are ignored |
-| `reviews.botUsers` | [] | GitHub usernames that are bots (for logging only — bot reviews are processed identically to human reviews) |
+| `github.authorUsername` | **required** | GitHub username whose PRs to watch |
+| `github.defaultRepo` | null | Default repo for CLI commands |
+| `reviews.ignoreUsers` | [] | Usernames whose reviews are ignored entirely |
+| `reviews.botUsers` | [] | Usernames that are bots (logging context only — processed identically to human reviews) |
 | `checks.requiredChecks` | [] | If set, only these checks must pass. If empty, all non-skipped checks must pass |
-| `checks.ignoreChecks` | [] | Check names to ignore when evaluating CI |
-| `notifications.webhookUrl` | null | Incoming webhook URL for chat notifications |
+| `checks.ignoreChecks` | [] | Check names to skip when evaluating CI |
+| `agent.conductorUrl` | null | Conductor MCP server URL. If null, messages go to stdout |
+| `notifications.notifyAgent` | **required** | Agent codename to route all PR issues to |
+| `notifications.webhookUrl` | null | Incoming webhook URL for chat notifications (Slack/Discord/Teams) |
 | `reviewInbox.enabled` | false | Enable review assignment detection |
 | `reviewInbox.githubUser` | null | GitHub username to watch for review requests |
-| `reviewInbox.notifyAgent` | null | Conductor agent codename to notify on new assignments |
-| `reviewInbox.notifyPane` | null | Tmux pane to notify (alternative to conductor) |
-| `reviewInbox.ignoreRepos` | [] | Repos to exclude from review inbox |
+| `reviewInbox.notifyAgent` | null | Agent to notify for review assignments (falls back to `notifications.notifyAgent`) |
+| `reviewInbox.maxAgeDays` | 5 | Only notify for PRs updated within this many days |
 | `reviewInbox.ignoreDrafts` | true | Skip draft PRs |
+| `reviewInbox.ignoreRepos` | [] | Repos to exclude from review inbox |
+
+### Environment Variables
+
+All env vars are optional and override config file values:
+
+```bash
+PR_SHEPHERD_DATA_DIR=./data
+PR_SHEPHERD_CONDUCTOR_URL=http://localhost:3456
+PR_SHEPHERD_AUTHOR_USERNAME=your-github-username
+PR_SHEPHERD_NOTIFY_AGENT=your-assistant-agent
+PR_SHEPHERD_POLL_INTERVAL=180
+PR_SHEPHERD_STALE_HOURS=4
+PR_SHEPHERD_REQUIRED_APPROVALS=1
+PR_SHEPHERD_DRY_RUN=false
+PR_SHEPHERD_DEFAULT_REPO=your-org/your-repo
+PR_SHEPHERD_WEBHOOK_URL=https://hooks.slack.com/services/...
+PR_SHEPHERD_REVIEW_INBOX_ENABLED=true
+PR_SHEPHERD_REVIEW_INBOX_USER=your-github-username
+PR_SHEPHERD_REVIEW_INBOX_AGENT=your-assistant-agent
+```
 
 ## CLI Commands
 
 ```bash
-pr-shepherd start [options]       # Start the polling daemon
-  --dry-run                       # Log without executing
-  --interval <seconds>            # Override poll interval
-  -c, --config <path>             # Config file path
+pr-shepherd start [options]    # Start the polling daemon
+  --dry-run                    # Log without sending messages
+  --interval <seconds>         # Override poll interval
+  -c, --config <path>          # Config file path
 
-pr-shepherd add <url> [options]   # Track a PR
-  -w, --worker <name>             # Worker agent name
-  --channel <channel>             # Chat channel override
+pr-shepherd status [options]   # Show watched PRs and their current state
   -c, --config <path>
 
-pr-shepherd list [options]        # Show tracked PRs
+pr-shepherd events [options]   # Show event audit log
+  --pr <number>                # Filter by PR number
+  --repo <repo>                # Filter by repository
+  -n, --last <count>           # Show last N events
   -c, --config <path>
 
-pr-shepherd remove <number>       # Stop tracking a PR
-  -r, --repo <repo>               # Repository (owner/repo)
-  -c, --config <path>
-
-pr-shepherd events [options]      # Show event log
-  --pr <number>                   # Filter by PR
-  --repo <repo>                   # Filter by repo
-  -n, --last <count>              # Last N events
-  -c, --config <path>
-
-pr-shepherd inbox [options]      # Show pending review assignments
+pr-shepherd inbox [options]    # Show pending review assignments
   -c, --config <path>
 ```
 
@@ -175,24 +248,24 @@ pr-shepherd inbox [options]      # Show pending review assignments
 
 ### State Machine
 
-Each tracked PR moves through these states:
+Each discovered PR is tracked through these states:
 
 ```
 OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → MERGED
-                    → CI_FAILED → (worker fixes) → CI_PENDING (loop)
-                                                  → CHANGES_REQUESTED → (worker fixes) → CI_PENDING (loop)
-                                                  → STALE → (re-request reviews) → AWAITING_REVIEW
+                    ↘ CI_FAILED ──→ (notify agent) ──→ CI_PENDING (on new commit)
+                                    AWAITING_REVIEW → CHANGES_REQUESTED → (notify agent) → CI_PENDING (on new commit)
+                                    AWAITING_REVIEW → STALE → (notify agent)
 ```
 
 Terminal states: `MERGED`, `CLOSED` (reachable from any non-terminal state).
 
-### Event Log
+### Data Files
 
-All state transitions are recorded in `data/pr-events.jsonl` (one JSON object per line):
+All runtime state lives in the `data/` directory (gitignored):
 
-```json
-{"ts":"2026-06-15T12:03:00Z","pr":123,"repo":"org/repo","event":"ci_failed","from":"CI_PENDING","to":"CI_FAILED","details":{"failedChecks":["lint"]}}
-```
+- `pr-state-cache.json` — current state of each watched PR (auto-discovered, not manually registered)
+- `pr-events.jsonl` — append-only audit log of every state transition
+- `review-inbox.json` — review assignments already notified (dedup list)
 
 ### Project Structure
 
@@ -200,62 +273,33 @@ All state transitions are recorded in `data/pr-events.jsonl` (one JSON object pe
 pr-shepherd/
 ├── src/
 │   ├── index.ts            CLI entry point
-│   ├── daemon.ts            Polling daemon
-│   ├── shepherd.ts          Event handler
-│   ├── state-machine.ts     State transitions
+│   ├── daemon.ts            PR discovery + polling loop
+│   ├── shepherd.ts          Event message parsing
+│   ├── state-machine.ts     State transitions (pure functions)
+│   ├── state-cache.ts       State persistence (JSON file)
 │   ├── github.ts            GitHub CLI wrapper
-│   ├── notifications.ts     tmux + webhook notifications
+│   ├── notifications.ts     Conductor + webhook notifications
 │   ├── review-inbox.ts      Review assignment detection
-│   ├── tracking.ts          PR tracking file I/O
 │   ├── events.ts            Event log I/O
 │   ├── config.ts            Configuration loader
 │   └── types.ts             Type definitions
-├── test/                    Vitest test suite
+├── test/                    Vitest test suite (113 tests)
 ├── config/
 │   ├── shepherd.example.json
-│   └── system-prompt.txt    Shepherd agent prompt
-└── data/                    Runtime state (gitignored)
-```
-
-## Integration with Agent Orchestrators
-
-PR Shepherd integrates with agent orchestration systems (like [Agent Conductor](https://github.com/your-org/agent-conductor)) via two mechanisms:
-
-1. **Conductor MCP** — set `PR_SHEPHERD_CONDUCTOR_URL` to the conductor's MCP server URL. The shepherd uses `send_to_agent` to message worker agents by codename.
-
-2. **tmux direct** — without a conductor, the shepherd types messages directly into worker agents' tmux panes.
-
-### Worker Registration
-
-When a worker agent opens a PR, it registers it:
-
-```bash
-pr-shepherd add https://github.com/org/repo/pull/123 --worker worker-1
-```
-
-Or programmatically by appending to `data/pr-tracking.json`:
-
-```json
-{
-  "number": 123,
-  "repo": "org/repo",
-  "worker": "worker-1",
-  "channel": null,
-  "state": "OPENED",
-  "headSha": null,
-  "addedAt": "2026-06-15T12:00:00Z",
-  "lastCheckedAt": null,
-  "lastEventAt": null
-}
+│   └── system-prompt.txt    Shepherd agent prompt (if running as Claude session)
+├── data/                    Runtime state (gitignored)
+├── Makefile
+└── .env.example
 ```
 
 ## Development
 
 ```bash
 npm install
-npm test              # Run test suite
+npm test              # Run test suite (113 tests)
 npm run typecheck     # TypeScript checking
-npm run dev -- start  # Run daemon via tsx (no build needed)
+npm run build         # Compile to dist/
+make start-dry        # Test against real GitHub data without sending messages
 ```
 
 ## License

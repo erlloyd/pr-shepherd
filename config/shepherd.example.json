@@ -3,10 +3,15 @@
   "staleThresholdHours": 4,
   "requiredApprovals": 1,
   "mergeStrategy": "squash",
-  "dryRun": false,
 
   "github": {
-    "defaultRepo": "your-org/your-repo"
+    "defaultRepo": "your-org/your-repo",
+    "authorUsername": "your-github-username"
+  },
+
+  "agent": {
+    "conductorUrl": "http://localhost:3456",
+    "shepherdPane": null
   },
 
   "reviews": {
@@ -20,7 +25,9 @@
   },
 
   "notifications": {
-    "channel": "pr-reviews",
+    "webhookUrl": null,
+    "channel": null,
+    "notifyAgent": "your-assistant-agent",
     "onMerge": true,
     "onCIFailure": true,
     "onStale": true,
@@ -33,6 +40,7 @@
     "notifyAgent": "your-assistant-agent",
     "notifyPane": null,
     "ignoreRepos": [],
-    "ignoreDrafts": true
+    "ignoreDrafts": true,
+    "maxAgeDays": 5
   }
 }
