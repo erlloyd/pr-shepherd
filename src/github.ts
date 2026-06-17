@@ -91,6 +91,43 @@ export function postComment(number: number, repo: string, body: string): void {
   gh(["pr", "comment", String(number), "-R", repo, "--body", body]);
 }
 
+export type BotComment = {
+  author: string;
+  body: string;
+  createdAt: string;
+  hasActionableFindings: boolean;
+};
+
+export function fetchBotComments(
+  number: number,
+  repo: string,
+  botUsers: string[],
+): BotComment[] {
+  if (botUsers.length === 0) return [];
+  const [owner, name] = repo.split("/");
+  const json = gh([
+    "api",
+    `repos/${owner}/${name}/issues/${number}/comments`,
+    "--jq",
+    ".",
+  ]);
+  const comments = JSON.parse(json) as Array<{
+    user: { login: string };
+    body: string;
+    created_at: string;
+  }>;
+
+  const botSet = new Set(botUsers.map((u) => u.toLowerCase()));
+  return comments
+    .filter((c) => botSet.has(c.user.login.toLowerCase()))
+    .map((c) => ({
+      author: c.user.login,
+      body: c.body,
+      createdAt: c.created_at,
+      hasActionableFindings: /❌/.test(c.body),
+    }));
+}
+
 export function fetchCommits(
   number: number,
   repo: string,

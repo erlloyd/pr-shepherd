@@ -9,6 +9,7 @@ import {
   evaluateReviews,
   enableAutoMerge,
   updateBranch,
+  fetchBotComments,
 } from "./github.js";
 import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-cache.js";
 import { appendEvent } from "./events.js";
@@ -266,9 +267,64 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         const details = { approvals: reviewResult.approvals };
         tryTransition(config, pr, "all_approved", details);
         await handleTransition(config, pr, "APPROVED", details);
-      } else if (pr.state === "CI_PASSED" && reviews.length > 0) {
-        tryTransition(config, pr, "review_posted");
+      } else if (pr.state === "CI_PASSED") {
+        if (reviews.length > 0) {
+          tryTransition(config, pr, "review_posted");
+        }
+
+        const botComments = fetchBotComments(pr.number, pr.repo, config.reviews.botUsers);
+        const cutoff = pr.lastBotCommentNotifiedAt ?? "1970-01-01T00:00:00Z";
+        const newActionable = botComments.filter(
+          (c) => c.hasActionableFindings && c.createdAt > cutoff,
+        );
+        if (newActionable.length > 0) {
+          for (const comment of newActionable) {
+            const msg = [
+              `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Bot Review Feedback`,
+              "",
+              `Bot: ${comment.author}`,
+              "",
+              comment.body,
+              "",
+              "This bot review has actionable findings (❌) that need to be addressed before the PR can be approved.",
+            ].join("\n");
+            log(`Bot feedback with actionable findings from ${comment.author} on PR #${pr.number}`);
+            if (!config.dryRun) {
+              await sendToAgent(config, config.notifications.notifyAgent!, msg);
+            }
+          }
+          pr.lastBotCommentNotifiedAt = newActionable[newActionable.length - 1].createdAt;
+          upsertCachedPR(config.dataDir, pr);
+          if (pr.state === "CI_PASSED") {
+            tryTransition(config, pr, "review_posted");
+          }
+        }
       } else if (pr.state === "AWAITING_REVIEW") {
+        const botComments = fetchBotComments(pr.number, pr.repo, config.reviews.botUsers);
+        const cutoff = pr.lastBotCommentNotifiedAt ?? "1970-01-01T00:00:00Z";
+        const newActionable = botComments.filter(
+          (c) => c.hasActionableFindings && c.createdAt > cutoff,
+        );
+        if (newActionable.length > 0) {
+          for (const comment of newActionable) {
+            const msg = [
+              `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Bot Review Feedback`,
+              "",
+              `Bot: ${comment.author}`,
+              "",
+              comment.body,
+              "",
+              "This bot review has actionable findings (❌) that need to be addressed before the PR can be approved.",
+            ].join("\n");
+            log(`Bot feedback with actionable findings from ${comment.author} on PR #${pr.number}`);
+            if (!config.dryRun) {
+              await sendToAgent(config, config.notifications.notifyAgent!, msg);
+            }
+          }
+          pr.lastBotCommentNotifiedAt = newActionable[newActionable.length - 1].createdAt;
+          upsertCachedPR(config.dataDir, pr);
+        }
+
         const staleHours =
           (Date.now() - new Date(pr.lastEventAt ?? now()).getTime()) /
           (1000 * 60 * 60);
@@ -313,6 +369,7 @@ export async function pollAll(config: ShepherdConfig): Promise<void> {
       headSha: null,
       lastCheckedAt: null,
       lastEventAt: null,
+      lastBotCommentNotifiedAt: null,
     };
 
     await pollPR(config, pr);

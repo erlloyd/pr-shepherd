@@ -40,6 +40,7 @@ export type WatchedPR = {
   headSha: string | null;
   lastCheckedAt: string | null;
   lastEventAt: string | null;
+  lastBotCommentNotifiedAt: string | null;
 };
 
 export type PREventRecord = {
