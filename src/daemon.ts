@@ -264,9 +264,14 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         tryTransition(config, pr, "changes_requested", details);
         await handleTransition(config, pr, "CHANGES_REQUESTED", details);
       } else if (reviewResult.status === "approved") {
-        const details = { approvals: reviewResult.approvals };
-        tryTransition(config, pr, "all_approved", details);
-        await handleTransition(config, pr, "APPROVED", details);
+        if (prView.autoMergeRequest) {
+          tryTransition(config, pr, "all_approved", { approvals: reviewResult.approvals });
+          tryTransition(config, pr, "auto_merge_enabled");
+        } else {
+          const details = { approvals: reviewResult.approvals };
+          tryTransition(config, pr, "all_approved", details);
+          await handleTransition(config, pr, "APPROVED", details);
+        }
       } else if (pr.state === "CI_PASSED") {
         if (reviews.length > 0) {
           tryTransition(config, pr, "review_posted");
