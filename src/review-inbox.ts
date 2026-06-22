@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { sendToAgent } from "./notifications.js";
+import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
 import { fetchBotComments } from "./github.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
@@ -247,7 +248,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         if (assignment.status === "dispatched" && !assignment.notifiedAt) {
           const msg = formatReviewAssignmentMessage(assignment);
           if (!config.dryRun) {
-            await notifyAgent(config, msg);
+            routeToAgent(config, msg, { reviewRequest: true });
           }
           assignment.notifiedAt = new Date().toISOString();
           updated = true;
