@@ -13,6 +13,7 @@ const DEFAULTS: ShepherdConfig = {
   github: {
     defaultRepo: null,
     authorUsername: null,
+    ignoreRepos: [],
   },
 
   reviews: {

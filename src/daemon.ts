@@ -81,6 +81,10 @@ function tryTransition(
   return next;
 }
 
+export function filterAuthoredPRs(prs: RawSearchResult[], ignoreRepos: string[]): RawSearchResult[] {
+  return prs.filter((pr) => !pr.isDraft && !ignoreRepos.includes(pr.repository.nameWithOwner));
+}
+
 export function discoverAuthoredPRs(username: string): RawSearchResult[] {
   const json = execFileSync(
     "gh",
@@ -392,7 +396,7 @@ export async function pollAll(config: ShepherdConfig): Promise<void> {
     return;
   }
 
-  const openPRs = discovered.filter((pr) => !pr.isDraft);
+  const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos);
   log(`Found ${openPRs.length} open non-draft PR(s).`);
 
   for (const raw of openPRs) {

@@ -135,6 +135,7 @@ export type ShepherdConfig = {
   github: {
     defaultRepo: string | null;
     authorUsername: string | null;
+    ignoreRepos: string[];
   };
 
   reviews: {
