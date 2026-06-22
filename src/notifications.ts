@@ -1,3 +1,4 @@
+import { routeToAgent } from "./ateam-conductor.js";
 import type { ShepherdConfig } from "./types.js";
 
 export async function sendToAgent(
@@ -5,33 +6,7 @@ export async function sendToAgent(
   targetAgent: string,
   message: string,
 ): Promise<void> {
-  if (!config.agent.conductorUrl) {
-    console.log(`[pr-shepherd] No conductor URL — would send to ${targetAgent}:\n${message}`);
-    return;
-  }
-
-  const url = `${config.agent.conductorUrl}/mcp/pr-shepherd`;
-  const body = {
-    jsonrpc: "2.0",
-    id: Date.now(),
-    method: "tools/call",
-    params: {
-      name: "send_to_agent",
-      arguments: { codename: targetAgent, message },
-    },
-  };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Conductor send to ${targetAgent} failed: ${response.status} ${response.statusText}`,
-    );
-  }
+  routeToAgent(config, message);
 }
 
 export async function postWebhook(
