@@ -157,11 +157,6 @@ export type ShepherdConfig = {
     onApproval: boolean;
   };
 
-  agent: {
-    conductorUrl: string | null;
-    shepherdPane: string | null;
-  };
-
   reviewInbox: {
     enabled: boolean;
     githubUser: string | null;
