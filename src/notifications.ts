@@ -87,6 +87,10 @@ export function formatApprovalMessage(
   prNumber: number,
   repo: string,
   approvals: number,
+  autoMerge: boolean,
 ): string {
-  return `[PR Shepherd] PR #${prNumber} (${repo}) — Approved (${approvals} approval${approvals !== 1 ? "s" : ""}). Enabling auto-merge.`;
+  const head = `[PR Shepherd] PR #${prNumber} (${repo}) — Approved (${approvals} approval${approvals !== 1 ? "s" : ""}).`;
+  return autoMerge
+    ? `${head} Enabling auto-merge.`
+    : `🚩 ${head} Ready to merge — auto-merge is disabled, so merge it yourself when you're ready.`;
 }

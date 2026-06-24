@@ -38,7 +38,15 @@ describe("config", () => {
     const config = loadConfig(join(TMP, "nonexistent.json"));
     expect(config.pollIntervalSeconds).toBe(180);
     expect(config.mergeStrategy).toBe("squash");
+    expect(config.autoMerge).toBe(true);
     expect(config.dryRun).toBe(false);
+  });
+
+  it("allows disabling auto-merge", () => {
+    const path = join(TMP, "no-automerge.json");
+    writeJson(path, { autoMerge: false, github: { authorUsername: "testuser" } });
+    const config = loadConfig(path);
+    expect(config.autoMerge).toBe(false);
   });
 
   it("accepts minimal config with only authorUsername", () => {

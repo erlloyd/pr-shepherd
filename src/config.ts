@@ -7,6 +7,7 @@ const DEFAULTS: ShepherdConfig = {
   staleThresholdHours: 4,
   requiredApprovals: 1,
   mergeStrategy: "squash",
+  autoMerge: true,
   dryRun: false,
   dataDir: "./data",
 
@@ -19,6 +20,7 @@ const DEFAULTS: ShepherdConfig = {
   reviews: {
     ignoreUsers: [],
     botUsers: [],
+    reviewerUsers: [],
   },
 
   checks: {

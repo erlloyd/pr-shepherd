@@ -42,6 +42,8 @@ export type WatchedPR = {
   lastEventAt: string | null;
   lastBotCommentNotifiedAt: string | null;
   botFeedbackCount: number;
+  lastReviewerCommentNotifiedAt: string | null;
+  lastReviewerReviewCommentNotifiedAt: string | null;
 };
 
 export type PREventRecord = {
@@ -129,6 +131,7 @@ export type ShepherdConfig = {
   staleThresholdHours: number;
   requiredApprovals: number;
   mergeStrategy: MergeStrategy;
+  autoMerge: boolean;
   dryRun: boolean;
   dataDir: string;
 
@@ -141,6 +144,7 @@ export type ShepherdConfig = {
   reviews: {
     ignoreUsers: string[];
     botUsers: string[];
+    reviewerUsers: string[];
   };
 
   checks: {

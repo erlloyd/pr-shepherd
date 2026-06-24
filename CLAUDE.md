@@ -9,7 +9,9 @@ A single long-running Node.js process with two polling loops on a shared interva
 1. **Authored PR monitoring** — `gh search prs --author=<user>` discovers open non-draft PRs. For each, polls CI checks, reviews, and merge state. Detects state transitions via a pure-function state machine. Actions taken automatically:
    - **CI failure** → notifies the configured agent with the list of failed checks
    - **Review with changes requested** → sends the full review body to the agent
-   - **All approvals met** → enables auto-merge (`gh pr merge --auto --squash`)
+   - **Bot review feedback** → for each user in `reviews.botUsers`, scans PR issue comments for actionable findings (`❌`) and forwards them to the agent. Capped at `botFeedback.maxAttempts` per PR.
+   - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
+   - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
    - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges.
    - **Auto-merge enabled but merge conflicts** → escalates to the agent (cannot auto-resolve)
    - **PR stale** (awaiting review past threshold) → notifies the agent

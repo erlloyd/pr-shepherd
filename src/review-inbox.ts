@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { sendToAgent } from "./notifications.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
-import { fetchBotComments } from "./github.js";
+import { fetchCommentsByUsers } from "./github.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
 
 type RawSearchResult = {
@@ -85,12 +85,12 @@ function getPRState(number: number, repo: string): string {
 }
 
 function botHasReviewed(number: number, repo: string, botUsername: string): boolean {
-  const comments = fetchBotComments(number, repo, [botUsername]);
+  const comments = fetchCommentsByUsers(number, repo, [botUsername]);
   return comments.length > 0;
 }
 
 function botAutoApproved(number: number, repo: string, botUsername: string): boolean {
-  const comments = fetchBotComments(number, repo, [botUsername]);
+  const comments = fetchCommentsByUsers(number, repo, [botUsername]);
   if (comments.length === 0) return false;
   const latest = comments[comments.length - 1];
   return /###\s*✅\s*Auto-approved/i.test(latest.body);

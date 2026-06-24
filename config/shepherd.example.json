@@ -1,6 +1,13 @@
 {
+  "autoMerge": true,
+
   "github": {
     "authorUsername": "your-github-username"
+  },
+
+  "reviews": {
+    "botUsers": ["review-bot-username"],
+    "reviewerUsers": ["teammate-github-username"]
   },
 
   "reviewInbox": {
