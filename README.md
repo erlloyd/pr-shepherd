@@ -15,7 +15,9 @@ Two watch loops run on a configurable interval (default: 3 minutes):
    - **Branch behind base with auto-merge enabled** → runs `gh pr update-branch` to bring it up to date, then monitors CI until the merge completes. Repeats every poll cycle until merged.
    - **Merge conflicts with auto-merge enabled** → routes an escalation event (cannot auto-resolve)
    - **PR goes stale** (no review activity past threshold) → routes a `stale_detected` event
-   - **PR merges or closes** → cleans up state cache, routes confirmation
+   - **Enters merge queue** (if `mergeQueue.enabled`) → routes an informational event, no action needed
+   - **Left merge queue without merging** → routes an escalation event (usually means the queue's CI check failed)
+   - **PR merges or closes** → cleans up state cache, routes a close-out instruction (merge) or a plain confirmation (close)
 
 2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Routes new assignments to `ateam route-pr-event`.
 
@@ -143,6 +145,10 @@ Three layers, in priority order:
     "ignoreRepos": [],
     "ignoreDrafts": true,
     "maxAgeDays": 5
+  },
+
+  "mergeQueue": {
+    "enabled": false
   }
 }
 ```
@@ -166,6 +172,7 @@ Three layers, in priority order:
 | `reviewInbox.maxAgeDays` | 5 | Only notify for PRs updated within this many days |
 | `reviewInbox.ignoreDrafts` | true | Skip draft PRs |
 | `reviewInbox.ignoreRepos` | [] | Repos to exclude from review inbox |
+| `mergeQueue.enabled` | false | Detect GitHub's native merge queue (extra `gh api graphql` call per poll while a PR is auto-merge-enabled or queued) |
 
 ### Environment Variables
 
@@ -213,7 +220,7 @@ pr-shepherd inbox [options]    # Show pending review assignments
 Each discovered PR is tracked through these states:
 
 ```
-OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → MERGED
+OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → [IN_MERGE_QUEUE] → MERGED
 ```
 
 Key loops and branches:
@@ -221,6 +228,7 @@ Key loops and branches:
 - **Changes requested**: `AWAITING_REVIEW → CHANGES_REQUESTED` → `ateam route-pr-event` → worker fixes → `CI_PENDING`
 - **Behind base branch**: `AUTO_MERGE_ENABLED` + `BEHIND` → `gh pr update-branch` → CI re-runs → polls until merged
 - **Merge conflicts**: `AUTO_MERGE_ENABLED` + `CONFLICTING` → escalated via `ateam route-pr-event`
+- **Merge queue** (opt-in via `mergeQueue.enabled`): `AUTO_MERGE_ENABLED` → `IN_MERGE_QUEUE` → informational `ateam route-pr-event`, then merges normally; if dequeued without merging, escalates via `ateam route-pr-event` and returns to `AUTO_MERGE_ENABLED`
 - **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → `ateam route-pr-event`
 - **External auto-merge**: if GitHub shows `autoMergeRequest` already set on an `APPROVED` PR, transitions to `AUTO_MERGE_ENABLED` automatically
 
