@@ -6,3 +6,4 @@ data/
 .DS_Store
 shepherd.config.json
 .worktrees/
+.superpowers/
