@@ -116,19 +116,29 @@ No env var override is added (matches the precedent of e.g.
 
 ## Testing
 
+Checked actual test coverage precedent before finalizing this: the suite
+tests pure functions only (state machine, `evaluateChecks`/`evaluateReviews`/
+`parseChecks`/`parseReviews`/`buildSnapshot`/`selectNewComments`,
+`filterAuthoredPRs`, config loading). Every `gh`-CLI-wrapping function in
+`github.ts` (`fetchPRView`, `fetchChecks`, `enableAutoMerge`, etc.) and every
+formatter in `notifications.ts` is untested — thin wrappers/templates, not
+unit-tested by convention. `pollPR` itself has zero test coverage today (no
+mocking harness for it exists). This feature follows the same shape, so:
+
 - `state-machine.test.ts`: 5 new transition cases (`entered_merge_queue`,
   `left_queue`, and `IN_MERGE_QUEUE`'s `merged`/`closed`/`new_commit`), plus
-  confirming `IN_MERGE_QUEUE` is non-terminal.
-- `daemon.test.ts`: polling scenarios for entering the queue, staying
-  queued (no-op), and being dequeued — mocking `fetchMergeQueueStatus`.
-  Also a scenario confirming the extra GraphQL call is skipped entirely
-  when `mergeQueue.enabled` is false.
-- Inline assertions on the two new formatters and the updated
-  `formatMergeMessage` output (existing formatter tests live inline in
-  `shepherd.test.ts` / `daemon.test.ts`, no dedicated
-  `notifications.test.ts` file exists today — follow that precedent).
-- `github.test.ts`: `fetchMergeQueueStatus` parses the GraphQL response
-  shape correctly (mocking `execFileSync`).
+  confirming `IN_MERGE_QUEUE` is non-terminal — matches existing coverage
+  exactly.
+- `config.test.ts`: one new case confirming `mergeQueue.enabled` defaults to
+  `false` and can be overridden via file config — matches the existing
+  `notifications.onMerge` deep-merge test shape.
+- `fetchMergeQueueStatus` (new `github.ts` function) and the two new/updated
+  `notifications.ts` formatters: no dedicated tests, consistent with every
+  sibling function of the same shape.
+- `pollPR`'s new branches (entering queue, staying queued, dequeue
+  escalation): no dedicated tests, consistent with `pollPR` having no test
+  coverage today. Verified manually via `make start-dry` against a real PR
+  with merge queue enabled, if available, during implementation review.
 
 ## Non-goals
 
