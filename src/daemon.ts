@@ -329,6 +329,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       tryTransition(config, pr, "auto_merge_enabled");
     }
 
+    let enteredMergeQueueThisPoll = false;
     if (pr.state === "AUTO_MERGE_ENABLED") {
       const checkResult = evaluateChecks(checks, config);
       if (checkResult.status === "fail") {
@@ -361,6 +362,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         fetchMergeQueueStatus(pr.number, pr.repo)
       ) {
         tryTransition(config, pr, "entered_merge_queue");
+        enteredMergeQueueThisPoll = true;
         log(`PR #${pr.number} entered the merge queue.`);
         const msg = formatMergeQueueEnteredMessage(pr.number, pr.repo);
         if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
@@ -370,6 +372,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
     if (
       config.mergeQueue.enabled &&
       pr.state === "IN_MERGE_QUEUE" &&
+      !enteredMergeQueueThisPoll &&
       !fetchMergeQueueStatus(pr.number, pr.repo)
     ) {
       tryTransition(config, pr, "left_queue");
