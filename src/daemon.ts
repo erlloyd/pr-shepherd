@@ -11,6 +11,7 @@ import {
   updateBranch,
   fetchCommentsByUsers,
   selectNewComments,
+  fetchMergeQueueStatus,
 } from "./github.js";
 import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-cache.js";
 import { appendEvent } from "./events.js";
@@ -25,6 +26,8 @@ import {
   formatApprovalMessage,
   formatMergeMessage,
   formatStaleMessage,
+  formatMergeQueueEnteredMessage,
+  formatMergeQueueLeftMessage,
 } from "./notifications.js";
 import type { ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
 
@@ -351,6 +354,28 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
           if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
         }
       }
+
+      if (
+        config.mergeQueue.enabled &&
+        pr.state === "AUTO_MERGE_ENABLED" &&
+        fetchMergeQueueStatus(pr.number, pr.repo)
+      ) {
+        tryTransition(config, pr, "entered_merge_queue");
+        log(`PR #${pr.number} entered the merge queue.`);
+        const msg = formatMergeQueueEnteredMessage(pr.number, pr.repo);
+        if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
+      }
+    }
+
+    if (
+      config.mergeQueue.enabled &&
+      pr.state === "IN_MERGE_QUEUE" &&
+      !fetchMergeQueueStatus(pr.number, pr.repo)
+    ) {
+      tryTransition(config, pr, "left_queue");
+      log(`PR #${pr.number} left the merge queue without merging — escalating.`);
+      const msg = formatMergeQueueLeftMessage(pr.number, pr.repo);
+      if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
     }
 
     if (
