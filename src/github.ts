@@ -74,6 +74,33 @@ export function fetchReviews(number: number, repo: string): RawReview[] {
   return data.reviews;
 }
 
+export function parseMergeQueueStatus(json: string): boolean {
+  const data = JSON.parse(json) as {
+    data: { repository: { pullRequest: { isInMergeQueue: boolean } } };
+  };
+  return data.data.repository.pullRequest.isInMergeQueue;
+}
+
+// isInMergeQueue is only exposed via GraphQL, not gh pr view --json.
+export function fetchMergeQueueStatus(number: number, repo: string): boolean {
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}";
+  const json = gh([
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `number=${number}`,
+  ]);
+  return parseMergeQueueStatus(json);
+}
+
 export function enableAutoMerge(
   number: number,
   repo: string,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments } from "../src/github.js";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus } from "../src/github.js";
 import type { IssueComment } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
@@ -233,6 +233,18 @@ describe("github", () => {
       expect(snapshot.headSha).toBe("abc123def456");
       expect(snapshot.checks).toHaveLength(1);
       expect(snapshot.reviews).toHaveLength(1);
+    });
+  });
+
+  describe("parseMergeQueueStatus", () => {
+    it("returns true when the PR is in the merge queue", () => {
+      const raw = readFileSync(join(FIXTURES, "merge-queue-in-queue.json"), "utf-8");
+      expect(parseMergeQueueStatus(raw)).toBe(true);
+    });
+
+    it("returns false when the PR is not in the merge queue", () => {
+      const raw = readFileSync(join(FIXTURES, "merge-queue-not-in-queue.json"), "utf-8");
+      expect(parseMergeQueueStatus(raw)).toBe(false);
     });
   });
 });
