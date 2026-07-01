@@ -17,7 +17,8 @@ Two watch loops run on a configurable interval (default: 3 minutes):
    - **PR goes stale** (no review activity past threshold) → routes a `stale_detected` event
    - **Enters merge queue** (if `mergeQueue.enabled`) → routes an informational event, no action needed
    - **Left merge queue without merging** → routes an escalation event (usually means the queue's CI check failed)
-   - **PR merges or closes** → cleans up state cache, routes a close-out instruction (merge) or a plain confirmation (close)
+   - **PR merges** → cleans up state cache, routes a close-out instruction
+   - **PR closes** → cleans up state cache silently (no event routed)
 
 2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Routes new assignments to `ateam route-pr-event`.
 

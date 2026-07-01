@@ -18,7 +18,7 @@ A single long-running Node.js process with two polling loops on a shared interva
    - **Left merge queue without merging** → escalates to the agent (usually means the queue's CI check failed)
    - **PR stale** (awaiting review past threshold) → notifies the agent
    - **PR merged** → cleans up state cache, instructs the agent to close out the session
-   - **PR closed** → cleans up state cache, sends confirmation
+   - **PR closed** → cleans up state cache silently (no notification sent)
 
 2. **Review inbox** — `gh search prs --review-requested=<user>` discovers incoming review assignments. Full lifecycle tracking:
    - **`waitForBot` gate** — if configured, holds dispatch until a bot (e.g. Canary) posts its review. If the bot auto-approves (no "Review Required", no ❌), skips human review entirely.
