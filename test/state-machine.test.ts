@@ -97,6 +97,26 @@ describe("state-machine", () => {
     it("moves AUTO_MERGE_ENABLED → CI_FAILED on ci_failed", () => {
       expect(transition("AUTO_MERGE_ENABLED", "ci_failed")).toBe("CI_FAILED");
     });
+
+    it("moves AUTO_MERGE_ENABLED → IN_MERGE_QUEUE on entered_merge_queue", () => {
+      expect(transition("AUTO_MERGE_ENABLED", "entered_merge_queue")).toBe(
+        "IN_MERGE_QUEUE",
+      );
+    });
+
+    it("moves IN_MERGE_QUEUE → MERGED on merged", () => {
+      expect(transition("IN_MERGE_QUEUE", "merged")).toBe("MERGED");
+    });
+
+    it("moves IN_MERGE_QUEUE → AUTO_MERGE_ENABLED on left_queue", () => {
+      expect(transition("IN_MERGE_QUEUE", "left_queue")).toBe(
+        "AUTO_MERGE_ENABLED",
+      );
+    });
+
+    it("moves IN_MERGE_QUEUE → CI_PENDING on new_commit", () => {
+      expect(transition("IN_MERGE_QUEUE", "new_commit")).toBe("CI_PENDING");
+    });
   });
 
   describe("closed from any non-terminal state", () => {
@@ -109,6 +129,7 @@ describe("state-machine", () => {
       "CHANGES_REQUESTED",
       "APPROVED",
       "AUTO_MERGE_ENABLED",
+      "IN_MERGE_QUEUE",
       "STALE",
     ];
 
@@ -129,6 +150,8 @@ describe("state-machine", () => {
       "changes_requested",
       "all_approved",
       "auto_merge_enabled",
+      "entered_merge_queue",
+      "left_queue",
       "merged",
       "closed",
       "new_commit",
@@ -204,6 +227,43 @@ describe("state-machine", () => {
         { event: "review_posted", expected: "AWAITING_REVIEW" },
         { event: "all_approved", expected: "APPROVED" },
         { event: "auto_merge_enabled", expected: "AUTO_MERGE_ENABLED" },
+        { event: "merged", expected: "MERGED" },
+      ];
+
+      for (const { event, expected } of steps) {
+        const next = transition(state, event);
+        expect(next).toBe(expected);
+        state = next!;
+      }
+    });
+  });
+
+  describe("full lifecycle — merge queue", () => {
+    it("handles OPENED → ... → IN_MERGE_QUEUE → MERGED", () => {
+      let state: PRState = "OPENED";
+      const steps: Array<{ event: PREvent; expected: PRState }> = [
+        { event: "poll_started", expected: "CI_PENDING" },
+        { event: "ci_passed", expected: "CI_PASSED" },
+        { event: "review_posted", expected: "AWAITING_REVIEW" },
+        { event: "all_approved", expected: "APPROVED" },
+        { event: "auto_merge_enabled", expected: "AUTO_MERGE_ENABLED" },
+        { event: "entered_merge_queue", expected: "IN_MERGE_QUEUE" },
+        { event: "merged", expected: "MERGED" },
+      ];
+
+      for (const { event, expected } of steps) {
+        const next = transition(state, event);
+        expect(next).toBe(expected);
+        state = next!;
+      }
+    });
+
+    it("handles being dequeued and re-entering the queue", () => {
+      let state: PRState = "AUTO_MERGE_ENABLED";
+      const steps: Array<{ event: PREvent; expected: PRState }> = [
+        { event: "entered_merge_queue", expected: "IN_MERGE_QUEUE" },
+        { event: "left_queue", expected: "AUTO_MERGE_ENABLED" },
+        { event: "entered_merge_queue", expected: "IN_MERGE_QUEUE" },
         { event: "merged", expected: "MERGED" },
       ];
 

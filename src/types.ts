@@ -7,6 +7,7 @@ export type PRState =
   | "CHANGES_REQUESTED"
   | "APPROVED"
   | "AUTO_MERGE_ENABLED"
+  | "IN_MERGE_QUEUE"
   | "STALE"
   | "MERGED"
   | "CLOSED";
@@ -20,6 +21,8 @@ export type PREvent =
   | "changes_requested"
   | "all_approved"
   | "auto_merge_enabled"
+  | "entered_merge_queue"
+  | "left_queue"
   | "merged"
   | "closed"
   | "new_commit"

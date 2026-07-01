@@ -50,6 +50,13 @@ const transitions: Record<PRState, TransitionTable> = {
     merged: "MERGED",
     new_commit: "CI_PENDING",
     ci_failed: "CI_FAILED",
+    entered_merge_queue: "IN_MERGE_QUEUE",
+    closed: "CLOSED",
+  },
+  IN_MERGE_QUEUE: {
+    merged: "MERGED",
+    left_queue: "AUTO_MERGE_ENABLED",
+    new_commit: "CI_PENDING",
     closed: "CLOSED",
   },
   STALE: {
