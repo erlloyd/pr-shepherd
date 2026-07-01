@@ -124,6 +124,19 @@ describe("config", () => {
     expect(config.notifications.webhookUrl).toBeNull();
   });
 
+  it("defaults mergeQueue.enabled to false", () => {
+    process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
+    const config = loadConfig(join(TMP, "nonexistent.json"));
+    expect(config.mergeQueue.enabled).toBe(false);
+  });
+
+  it("allows enabling mergeQueue via config file", () => {
+    const path = join(TMP, "merge-queue.json");
+    writeJson(path, { mergeQueue: { enabled: true }, ...withRequiredFields() });
+    const config = loadConfig(path);
+    expect(config.mergeQueue.enabled).toBe(true);
+  });
+
   it("validates reviewInbox requires githubUser when enabled", () => {
     const path = join(TMP, "test.json");
     writeJson(path, {

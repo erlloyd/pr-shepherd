@@ -189,4 +189,8 @@ export type ShepherdConfig = {
     escalateAfterHours: number;
     businessDaysOnly: boolean;
   };
+
+  mergeQueue: {
+    enabled: boolean;
+  };
 };

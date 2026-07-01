@@ -62,6 +62,10 @@ const DEFAULTS: ShepherdConfig = {
     escalateAfterHours: 24,
     businessDaysOnly: true,
   },
+
+  mergeQueue: {
+    enabled: false,
+  },
 };
 
 const VALID_MERGE_STRATEGIES: ReadonlySet<string> = new Set([
