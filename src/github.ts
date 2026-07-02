@@ -48,16 +48,22 @@ export function fetchPRView(number: number, repo: string): RawPRView {
 }
 
 export function fetchChecks(number: number, repo: string): RawCheck[] {
-  const json = gh([
-    "pr",
-    "checks",
-    String(number),
-    "-R",
-    repo,
-    "--json",
-    "name,state,bucket,workflow",
-  ]);
-  return JSON.parse(json) as RawCheck[];
+  try {
+    const json = gh([
+      "pr",
+      "checks",
+      String(number),
+      "-R",
+      repo,
+      "--json",
+      "name,state,bucket,workflow",
+    ]);
+    return JSON.parse(json) as RawCheck[];
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("no checks reported")) return [];
+    throw err;
+  }
 }
 
 export function fetchReviews(number: number, repo: string): RawReview[] {
