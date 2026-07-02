@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { sendToAgent } from "./notifications.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
-import { fetchBotComments } from "./github.js";
+import { fetchCommentsByUsers } from "./github.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
 
 type RawSearchResult = {
@@ -85,12 +85,12 @@ function getPRState(number: number, repo: string): string {
 }
 
 function botHasReviewed(number: number, repo: string, botUsername: string): boolean {
-  const comments = fetchBotComments(number, repo, [botUsername]);
+  const comments = fetchCommentsByUsers(number, repo, [botUsername]);
   return comments.length > 0;
 }
 
 function botAutoApproved(number: number, repo: string, botUsername: string): boolean {
-  const comments = fetchBotComments(number, repo, [botUsername]);
+  const comments = fetchCommentsByUsers(number, repo, [botUsername]);
   if (comments.length === 0) return false;
   const latest = comments[comments.length - 1];
   return /###\s*✅\s*Auto-approved/i.test(latest.body);
@@ -245,25 +245,30 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         }
 
         // Dispatch notification for newly dispatched assignments
-        if (assignment.status === "dispatched" && !assignment.notifiedAt) {
+        if (assignment.status === "dispatched" && assignment.notifiedAt) {
+          log(`[pr-shepherd][debug] PR #${assignment.number} (${assignment.repo}) already notified at ${assignment.notifiedAt} — skipping dispatch`);
+        } else if (assignment.status === "dispatched" && !assignment.notifiedAt) {
           const msg = formatReviewAssignmentMessage(assignment);
-          if (!config.dryRun) {
+          if (config.dryRun) {
+            log(`[pr-shepherd][debug] [dry-run] would dispatch review of PR #${assignment.number} (${assignment.repo}) to ateam — skipping (notifiedAt NOT persisted)`);
+          } else {
+            log(`[pr-shepherd][debug] dispatching review of PR #${assignment.number} (${assignment.repo}) to ateam`);
             routeToAgent(config, msg, { reviewRequest: true });
+            assignment.notifiedAt = new Date().toISOString();
+            updated = true;
+
+            log(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
+
+            appendEvent(config.dataDir, {
+              ts: assignment.notifiedAt,
+              pr: assignment.number,
+              repo: assignment.repo,
+              event: "review_requested",
+              from: "OPENED",
+              to: "OPENED",
+              details: { type: "review_inbox", title: assignment.title, url: assignment.url },
+            });
           }
-          assignment.notifiedAt = new Date().toISOString();
-          updated = true;
-
-          log(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
-
-          appendEvent(config.dataDir, {
-            ts: assignment.notifiedAt,
-            pr: assignment.number,
-            repo: assignment.repo,
-            event: "review_requested",
-            from: "OPENED",
-            to: "OPENED",
-            details: { type: "review_inbox", title: assignment.title, url: assignment.url },
-          });
         }
       } catch (err) {
         log(`Error processing assignment PR #${assignment.number}: ${(err as Error).message}`);
@@ -278,7 +283,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
       return true;
     });
 
-    if (updated || active.length !== inbox.length) {
+    if (!config.dryRun && (updated || active.length !== inbox.length)) {
       writeInbox(config.dataDir, active);
     }
 

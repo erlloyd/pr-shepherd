@@ -9,11 +9,16 @@ A single long-running Node.js process with two polling loops on a shared interva
 1. **Authored PR monitoring** — `gh search prs --author=<user>` discovers open non-draft PRs. For each, polls CI checks, reviews, and merge state. Detects state transitions via a pure-function state machine. Actions taken automatically:
    - **CI failure** → notifies the configured agent with the list of failed checks
    - **Review with changes requested** → sends the full review body to the agent
-   - **All approvals met** → enables auto-merge (`gh pr merge --auto --squash`)
+   - **Bot review feedback** → for each user in `reviews.botUsers`, scans PR issue comments for actionable findings (`❌`) and forwards them to the agent. Capped at `botFeedback.maxAttempts` per PR.
+   - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
+   - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
    - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges.
    - **Auto-merge enabled but merge conflicts** → escalates to the agent (cannot auto-resolve)
+   - **Entered merge queue** (if `mergeQueue.enabled`) → sends an informational notice, no action needed
+   - **Left merge queue without merging** → escalates to the agent (usually means the queue's CI check failed)
    - **PR stale** (awaiting review past threshold) → notifies the agent
-   - **PR merged or closed** → cleans up state cache, sends confirmation
+   - **PR merged** → cleans up state cache, instructs the agent to close out the session
+   - **PR closed** → cleans up state cache silently (no notification sent)
 
 2. **Review inbox** — `gh search prs --review-requested=<user>` discovers incoming review assignments. Full lifecycle tracking:
    - **`waitForBot` gate** — if configured, holds dispatch until a bot (e.g. Canary) posts its review. If the bot auto-approves (no "Review Required", no ❌), skips human review entirely.
@@ -46,7 +51,7 @@ Communication is via HTTP POST to a conductor MCP endpoint (`send_to_agent`). If
 ## State Machine
 
 ```
-OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → MERGED
+OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → [IN_MERGE_QUEUE] → MERGED
 ```
 
 Key loops:
@@ -54,6 +59,7 @@ Key loops:
 - **Changes requested**: `AWAITING_REVIEW → CHANGES_REQUESTED` → agent notified → worker pushes fix → `CI_PENDING`
 - **Behind branch**: `AUTO_MERGE_ENABLED` + `BEHIND` → `gh pr update-branch` → CI re-runs → stays in `AUTO_MERGE_ENABLED` until merged
 - **Merge conflicts**: `AUTO_MERGE_ENABLED` + `CONFLICTING` → escalated to agent
+- **Merge queue** (opt-in via `mergeQueue.enabled`): `AUTO_MERGE_ENABLED → IN_MERGE_QUEUE` on entry (informational) → `MERGED` on merge, or `left_queue → AUTO_MERGE_ENABLED` with an escalation if dequeued without merging
 - **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → agent notified
 
 Terminal states: `MERGED`, `CLOSED` (reachable from any non-terminal state).
@@ -79,11 +85,11 @@ make inbox          # Pending review assignments
 ## Tests
 
 ```bash
-npm test            # 113 tests across 6 files
+npm test            # 150 tests across 8 files
 npm run typecheck   # Clean TypeScript check
 ```
 
-State machine has 70 tests covering every transition, terminal state, and full lifecycle scenario.
+State machine has 81 tests covering every transition, terminal state, and full lifecycle scenario.
 
 ## Data Files (gitignored)
 

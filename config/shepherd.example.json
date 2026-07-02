@@ -1,46 +1,17 @@
 {
-  "pollIntervalSeconds": 180,
-  "staleThresholdHours": 4,
-  "requiredApprovals": 1,
-  "mergeStrategy": "squash",
+  "autoMerge": true,
 
   "github": {
-    "defaultRepo": "your-org/your-repo",
     "authorUsername": "your-github-username"
   },
 
-  "agent": {
-    "conductorUrl": "http://localhost:3456",
-    "shepherdPane": null
-  },
-
   "reviews": {
-    "ignoreUsers": [],
-    "botUsers": ["your-review-bot[bot]"]
-  },
-
-  "checks": {
-    "requiredChecks": [],
-    "ignoreChecks": []
-  },
-
-  "notifications": {
-    "webhookUrl": null,
-    "channel": null,
-    "notifyAgent": "your-assistant-agent",
-    "onMerge": true,
-    "onCIFailure": true,
-    "onStale": true,
-    "onApproval": true
+    "botUsers": ["review-bot-username"],
+    "reviewerUsers": ["teammate-github-username"]
   },
 
   "reviewInbox": {
     "enabled": false,
-    "githubUser": "your-github-username",
-    "notifyAgent": "your-assistant-agent",
-    "notifyPane": null,
-    "ignoreRepos": [],
-    "ignoreDrafts": true,
-    "maxAgeDays": 5
+    "githubUser": "your-github-username"
   }
 }

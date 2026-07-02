@@ -1,12 +1,23 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   readInbox,
   writeInbox,
   formatReviewAssignmentMessage,
+  pollReviewInbox,
 } from "../src/review-inbox.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ReviewAssignment } from "../src/types.js";
+import type { ReviewAssignment, ShepherdConfig } from "../src/types.js";
+
+// Mock node:child_process so execFileSync never shells out in pollReviewInbox tests
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(),
+}));
+
+// Mock ateam-conductor so routeToAgent never execs
+vi.mock("../src/ateam-conductor.js", () => ({
+  routeToAgent: vi.fn(),
+}));
 
 const TMP = join(import.meta.dirname, "__tmp_review_inbox");
 
@@ -98,5 +109,101 @@ describe("review-inbox", () => {
       expect(keys.has("acme/widgets#42")).toBe(true);
       expect(keys.has("acme/widgets#99")).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollReviewInbox dry-run tests
+// ---------------------------------------------------------------------------
+
+function makePollConfig(overrides?: Partial<ShepherdConfig>): ShepherdConfig {
+  return {
+    pollIntervalSeconds: 30,
+    staleThresholdHours: 24,
+    requiredApprovals: 1,
+    mergeStrategy: "squash",
+    dryRun: true,
+    dataDir: TMP,
+    github: { defaultRepo: null, authorUsername: null },
+    reviews: { ignoreUsers: [], botUsers: [] },
+    checks: { requiredChecks: [], ignoreChecks: [] },
+    notifications: {
+      webhookUrl: null,
+      channel: null,
+      notifyAgent: null,
+      onMerge: true,
+      onCIFailure: true,
+      onStale: true,
+      onApproval: true,
+    },
+    agent: { conductorUrl: null, shepherdPane: null },
+    reviewInbox: {
+      enabled: true,
+      githubUser: "testuser",
+      notifyAgent: null,
+      notifyPane: null,
+      ignoreRepos: [],
+      ignoreDrafts: true,
+      maxAgeDays: 14,
+      waitForBot: null,
+    },
+    reviewFollowUp: { enabled: false },
+    botFeedback: { maxAttempts: 3 },
+    reviewerNudge: { enabled: false, escalateAfterHours: 24, businessDaysOnly: false },
+    ...overrides,
+  } as ShepherdConfig;
+}
+
+const { execFileSync } = await import("node:child_process");
+const { routeToAgent } = await import("../src/ateam-conductor.js");
+const mockedExec = vi.mocked(execFileSync);
+const mockedRoute = vi.mocked(routeToAgent);
+
+describe("pollReviewInbox dry-run", () => {
+
+  const TMP_POLL = join(import.meta.dirname, "__tmp_review_inbox_poll");
+
+  beforeEach(() => {
+    mkdirSync(TMP_POLL, { recursive: true });
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    rmSync(TMP_POLL, { recursive: true, force: true });
+  });
+
+  it("does NOT writeInbox or set notifiedAt when dryRun=true and a new assignment is ready to dispatch", async () => {
+    // Inbox has a dispatched assignment with no notifiedAt
+    const assignment: ReviewAssignment = {
+      number: 3511,
+      repo: "acme/widgets",
+      title: "feat: test dry-run",
+      url: "https://github.com/acme/widgets/pull/3511",
+      detectedAt: new Date().toISOString(),
+      notifiedAt: null,
+      completedAt: null,
+      status: "dispatched",
+    };
+    writeInbox(TMP_POLL, [assignment]);
+
+    // fetchReviewRequests → returns empty (no new PRs to discover)
+    // getPRState → "OPEN"
+    // hasUserReviewed → false (not reviewed yet)
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>) // getPRState
+      .mockReturnValueOnce(JSON.stringify({ reviews: [] }) as unknown as ReturnType<typeof execFileSync>); // hasUserReviewed
+
+    const config = makePollConfig({ dataDir: TMP_POLL });
+    await pollReviewInbox(config);
+
+    // routeToAgent must NOT have been called
+    expect(mockedRoute).not.toHaveBeenCalled();
+
+    // The inbox file must be unchanged — notifiedAt still null, status still dispatched
+    const persisted = readInbox(TMP_POLL);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].notifiedAt).toBeNull();
+    expect(persisted[0].status).toBe("dispatched");
   });
 });

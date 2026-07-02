@@ -18,7 +18,6 @@ function clearShepherdEnv() {
 function withRequiredFields(overrides?: Record<string, unknown>) {
   return {
     github: { authorUsername: "testuser", defaultRepo: null },
-    notifications: { notifyAgent: "test-agent", webhookUrl: null, channel: null, onMerge: true, onCIFailure: true, onStale: true, onApproval: true },
     ...overrides,
   };
 }
@@ -36,11 +35,26 @@ describe("config", () => {
 
   it("returns defaults when no config file exists (with required fields via env)", () => {
     process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
-    process.env.PR_SHEPHERD_NOTIFY_AGENT = "test-agent";
     const config = loadConfig(join(TMP, "nonexistent.json"));
     expect(config.pollIntervalSeconds).toBe(180);
     expect(config.mergeStrategy).toBe("squash");
+    expect(config.autoMerge).toBe(true);
     expect(config.dryRun).toBe(false);
+  });
+
+  it("allows disabling auto-merge", () => {
+    const path = join(TMP, "no-automerge.json");
+    writeJson(path, { autoMerge: false, github: { authorUsername: "testuser" } });
+    const config = loadConfig(path);
+    expect(config.autoMerge).toBe(false);
+  });
+
+  it("accepts minimal config with only authorUsername", () => {
+    const path = join(TMP, "minimal.json");
+    writeJson(path, { github: { authorUsername: "testuser" } });
+    const config = loadConfig(path);
+    expect(config.github.authorUsername).toBe("testuser");
+    expect(config.reviewInbox.enabled).toBe(false);
   });
 
   it("merges file config over defaults", () => {
@@ -86,23 +100,14 @@ describe("config", () => {
   });
 
   it("validates authorUsername is required", () => {
-    process.env.PR_SHEPHERD_NOTIFY_AGENT = "test-agent";
     expect(() => loadConfig(join(TMP, "nonexistent.json"))).toThrowError(
       "github.authorUsername is required",
-    );
-  });
-
-  it("validates notifyAgent is required", () => {
-    process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
-    expect(() => loadConfig(join(TMP, "nonexistent.json"))).toThrowError(
-      "notifications.notifyAgent is required",
     );
   });
 
   it("handles PR_SHEPHERD_DRY_RUN env var", () => {
     process.env.PR_SHEPHERD_DRY_RUN = "true";
     process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
-    process.env.PR_SHEPHERD_NOTIFY_AGENT = "test-agent";
     const config = loadConfig(join(TMP, "nonexistent.json"));
     expect(config.dryRun).toBe(true);
   });
@@ -111,12 +116,25 @@ describe("config", () => {
     const path = join(TMP, "test.json");
     writeJson(path, {
       github: { authorUsername: "testuser", defaultRepo: null },
-      notifications: { onMerge: false, notifyAgent: "test-agent" },
+      notifications: { onMerge: false },
     });
     const config = loadConfig(path);
     expect(config.notifications.onMerge).toBe(false);
     expect(config.notifications.onCIFailure).toBe(true);
     expect(config.notifications.webhookUrl).toBeNull();
+  });
+
+  it("defaults mergeQueue.enabled to false", () => {
+    process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
+    const config = loadConfig(join(TMP, "nonexistent.json"));
+    expect(config.mergeQueue.enabled).toBe(false);
+  });
+
+  it("allows enabling mergeQueue via config file", () => {
+    const path = join(TMP, "merge-queue.json");
+    writeJson(path, { mergeQueue: { enabled: true }, ...withRequiredFields() });
+    const config = loadConfig(path);
+    expect(config.mergeQueue.enabled).toBe(true);
   });
 
   it("validates reviewInbox requires githubUser when enabled", () => {
@@ -126,30 +144,11 @@ describe("config", () => {
       reviewInbox: {
         enabled: true,
         githubUser: null,
-        notifyAgent: "my-assistant",
-        notifyPane: null,
         ignoreRepos: [],
         ignoreDrafts: true,
         maxAgeDays: 5,
       },
     });
     expect(() => loadConfig(path)).toThrowError("reviewInbox.githubUser is required");
-  });
-
-  it("validates reviewInbox requires notifyAgent or notifyPane", () => {
-    const path = join(TMP, "test.json");
-    writeJson(path, {
-      ...withRequiredFields(),
-      reviewInbox: {
-        enabled: true,
-        githubUser: "testuser",
-        notifyAgent: null,
-        notifyPane: null,
-        ignoreRepos: [],
-        ignoreDrafts: true,
-        maxAgeDays: 5,
-      },
-    });
-    expect(() => loadConfig(path)).toThrowError("notifyAgent or notifyPane");
   });
 });

@@ -7,17 +7,20 @@ const DEFAULTS: ShepherdConfig = {
   staleThresholdHours: 4,
   requiredApprovals: 1,
   mergeStrategy: "squash",
+  autoMerge: true,
   dryRun: false,
   dataDir: "./data",
 
   github: {
     defaultRepo: null,
     authorUsername: null,
+    ignoreRepos: [],
   },
 
   reviews: {
     ignoreUsers: [],
     botUsers: [],
+    reviewerUsers: [],
   },
 
   checks: {
@@ -33,11 +36,6 @@ const DEFAULTS: ShepherdConfig = {
     onCIFailure: true,
     onStale: true,
     onApproval: true,
-  },
-
-  agent: {
-    conductorUrl: null,
-    shepherdPane: null,
   },
 
   reviewInbox: {
@@ -63,6 +61,10 @@ const DEFAULTS: ShepherdConfig = {
     enabled: false,
     escalateAfterHours: 24,
     businessDaysOnly: true,
+  },
+
+  mergeQueue: {
+    enabled: false,
   },
 };
 
@@ -105,10 +107,6 @@ function applyEnvOverrides(config: ShepherdConfig): ShepherdConfig {
   if (env.PR_SHEPHERD_DATA_DIR) config.dataDir = env.PR_SHEPHERD_DATA_DIR;
   if (env.PR_SHEPHERD_WEBHOOK_URL)
     config.notifications.webhookUrl = env.PR_SHEPHERD_WEBHOOK_URL;
-  if (env.PR_SHEPHERD_CONDUCTOR_URL)
-    config.agent.conductorUrl = env.PR_SHEPHERD_CONDUCTOR_URL;
-  if (env.PR_SHEPHERD_TMUX_PANE)
-    config.agent.shepherdPane = env.PR_SHEPHERD_TMUX_PANE;
   if (env.PR_SHEPHERD_POLL_INTERVAL) {
     const v = parseInt(env.PR_SHEPHERD_POLL_INTERVAL, 10);
     if (!isNaN(v)) config.pollIntervalSeconds = v;
@@ -155,19 +153,9 @@ function validate(config: ShepherdConfig): string[] {
     );
   if (!config.github.authorUsername)
     errors.push("github.authorUsername is required — set it in config or PR_SHEPHERD_AUTHOR_USERNAME");
-  if (!config.notifications.notifyAgent)
-    errors.push("notifications.notifyAgent is required — the agent to send PR issues to");
   if (config.reviewInbox.enabled && !config.reviewInbox.githubUser)
     errors.push(
       "reviewInbox.githubUser is required when reviewInbox is enabled",
-    );
-  if (
-    config.reviewInbox.enabled &&
-    !config.reviewInbox.notifyAgent &&
-    !config.reviewInbox.notifyPane
-  )
-    errors.push(
-      "reviewInbox requires either notifyAgent or notifyPane to deliver notifications",
     );
 
   return errors;

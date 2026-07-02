@@ -1,6 +1,6 @@
 # PR Shepherd
 
-Automated PR lifecycle management for AI coding agents. Watches GitHub for your open pull requests and incoming review assignments, detects state transitions (CI pass/fail, reviews, merges), and routes actionable information to a designated agent — so humans only need to write code and review code.
+Automated PR lifecycle management for AI coding agents. Watches GitHub for your open pull requests and incoming review assignments, detects state transitions (CI pass/fail, reviews, merges), and routes actionable information to `ateam route-pr-event` — so humans only need to write code and review code.
 
 No registration needed. The daemon discovers your PRs from GitHub automatically.
 
@@ -9,23 +9,26 @@ No registration needed. The daemon discovers your PRs from GitHub automatically.
 Two watch loops run on a configurable interval (default: 3 minutes):
 
 1. **Authored PR monitoring** — polls GitHub for open non-draft PRs by a configured author. For each PR, checks CI status, reviews, and merge state. On state transitions:
-   - **CI fails** → sends failure details to your notify agent
-   - **Reviewer requests changes** → sends the full review body to your notify agent
+   - **CI fails** → routes a `ci_failed` event to `ateam route-pr-event`
+   - **Reviewer requests changes** → routes a `changes_requested` event with the full review body
    - **All approvals received** → enables auto-merge via `gh pr merge --auto --squash`
    - **Branch behind base with auto-merge enabled** → runs `gh pr update-branch` to bring it up to date, then monitors CI until the merge completes. Repeats every poll cycle until merged.
-   - **Merge conflicts with auto-merge enabled** → escalates to your notify agent (cannot auto-resolve)
-   - **PR goes stale** (no review activity past threshold) → sends a stale notice
-   - **PR merges or closes** → cleans up state cache, sends confirmation
+   - **Merge conflicts with auto-merge enabled** → routes an escalation event (cannot auto-resolve)
+   - **PR goes stale** (no review activity past threshold) → routes a `stale_detected` event
+   - **Enters merge queue** (if `mergeQueue.enabled`) → routes an informational event, no action needed
+   - **Left merge queue without merging** → routes an escalation event (usually means the queue's CI check failed)
+   - **PR merges** → cleans up state cache, routes a close-out instruction
+   - **PR closes** → cleans up state cache silently (no event routed)
 
-2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Sends new assignments to your notify agent.
+2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Routes new assignments to `ateam route-pr-event`.
 
-**Communication:** All messages are sent via an [Agent Conductor](https://github.com/your-org/agent-conductor) MCP server using `send_to_agent`. If no conductor is configured, messages are logged to stdout instead. The daemon itself consumes zero AI tokens — it's pure Node.js polling.
+**Communication:** All events are routed via `ateam route-pr-event` with structured fields (repo, PR number, head branch, transition type). The daemon itself consumes zero AI tokens — it's pure Node.js polling.
 
 ## Prerequisites
 
 - **Node.js 22+**
 - **GitHub CLI (`gh`)** — authenticated (`gh auth login`)
-- **Agent Conductor** (optional) — for routing messages to other agents
+- **ateam** — on your PATH (or configure `PR_SHEPHERD_ATEAM_PATH`)
 
 ## Quick Start
 
@@ -49,45 +52,29 @@ Edit `shepherd.config.json` — at minimum you need:
 {
   "github": {
     "authorUsername": "your-github-username"
-  },
-  "notifications": {
-    "notifyAgent": "your-assistant-agent"
   }
 }
 ```
 
-### 3. Set up environment
+That's it. `reviewInbox` is optional and disabled by default.
+
+### 3. Set up environment (optional)
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` — set `PR_SHEPHERD_CONDUCTOR_URL` if you're using a conductor:
+Edit `.env` if you need to override the `ateam` binary path or other defaults:
 
 ```bash
-PR_SHEPHERD_CONDUCTOR_URL=http://localhost:3456
+PR_SHEPHERD_ATEAM_PATH=/path/to/ateam   # only needed if ateam is not on PATH
 ```
 
-### 4. Register with the conductor (if using one)
-
-Create an agent config for pr-shepherd in your conductor's `config/agents/` directory:
-
-```yaml
-# config/agents/pr-shepherd.yaml
-agent: pr-shepherd
-codename: pr-shepherd
-repo: /path/to/pr-shepherd
-model: claude-sonnet-4-6
-maxTurns: 10
-```
-
-The conductor will create an MCP endpoint at `/mcp/pr-shepherd` that the daemon uses to send messages. The conductor hot-reloads agent configs, so it should pick this up within 5 minutes — or restart the conductor to load it immediately.
-
-### 5. Start
+### 4. Start
 
 ```bash
 make start          # Start the daemon
-make start-dry      # Start in dry-run mode (logs only, no messages sent)
+make start-dry      # Start in dry-run mode (logs only, no events routed)
 ```
 
 Or without make:
@@ -97,23 +84,13 @@ npx tsx src/index.ts start
 npx tsx src/index.ts start --dry-run
 ```
 
-### 6. Check on things
+### 5. Check on things
 
 ```bash
 make status         # Show watched PRs and their states
 make events         # Show event audit log
 make inbox          # Show pending review assignments
 ```
-
-## Running Without a Conductor
-
-PR Shepherd works without an agent conductor. If `PR_SHEPHERD_CONDUCTOR_URL` is not set (or `agent.conductorUrl` is null in config), messages are logged to stdout instead of being routed to agents. This is useful for:
-
-- **Testing** — run `make start-dry` to see what the daemon would do
-- **Simple setups** — pipe stdout to a log file or monitoring tool
-- **Integration with other systems** — parse the structured log output
-
-You can also set `notifications.webhookUrl` to send notifications to a Slack/Discord/Teams incoming webhook independently of the conductor.
 
 ## Configuration
 
@@ -128,7 +105,6 @@ Three layers, in priority order:
 | Key | Env var | Description |
 |-----|---------|-------------|
 | `github.authorUsername` | `PR_SHEPHERD_AUTHOR_USERNAME` | GitHub username whose PRs to watch |
-| `notifications.notifyAgent` | `PR_SHEPHERD_NOTIFY_AGENT` | Agent codename to send all PR issues to |
 
 ### Full Config Reference
 
@@ -155,15 +131,9 @@ Three layers, in priority order:
     "ignoreChecks": ["optional-deploy-preview"]
   },
 
-  "agent": {
-    "conductorUrl": "http://localhost:3456",
-    "shepherdPane": null
-  },
-
   "notifications": {
     "webhookUrl": null,
     "channel": null,
-    "notifyAgent": "your-assistant-agent",
     "onMerge": true,
     "onCIFailure": true,
     "onStale": true,
@@ -173,11 +143,13 @@ Three layers, in priority order:
   "reviewInbox": {
     "enabled": true,
     "githubUser": "your-github-username",
-    "notifyAgent": "your-assistant-agent",
-    "notifyPane": null,
     "ignoreRepos": [],
     "ignoreDrafts": true,
     "maxAgeDays": 5
+  },
+
+  "mergeQueue": {
+    "enabled": false
   }
 }
 ```
@@ -195,25 +167,22 @@ Three layers, in priority order:
 | `reviews.botUsers` | [] | Usernames that are bots (logging context only — processed identically to human reviews) |
 | `checks.requiredChecks` | [] | If set, only these checks must pass. If empty, all non-skipped checks must pass |
 | `checks.ignoreChecks` | [] | Check names to skip when evaluating CI |
-| `agent.conductorUrl` | null | Conductor MCP server URL. If null, messages go to stdout |
-| `notifications.notifyAgent` | **required** | Agent codename to route all PR issues to |
 | `notifications.webhookUrl` | null | Incoming webhook URL for chat notifications (Slack/Discord/Teams) |
 | `reviewInbox.enabled` | false | Enable review assignment detection |
 | `reviewInbox.githubUser` | null | GitHub username to watch for review requests |
-| `reviewInbox.notifyAgent` | null | Agent to notify for review assignments (falls back to `notifications.notifyAgent`) |
 | `reviewInbox.maxAgeDays` | 5 | Only notify for PRs updated within this many days |
 | `reviewInbox.ignoreDrafts` | true | Skip draft PRs |
 | `reviewInbox.ignoreRepos` | [] | Repos to exclude from review inbox |
+| `mergeQueue.enabled` | false | Detect GitHub's native merge queue (extra `gh api graphql` call per poll while a PR is auto-merge-enabled or queued) |
 
 ### Environment Variables
 
 All env vars are optional and override config file values:
 
 ```bash
-PR_SHEPHERD_DATA_DIR=./data
-PR_SHEPHERD_CONDUCTOR_URL=http://localhost:3456
 PR_SHEPHERD_AUTHOR_USERNAME=your-github-username
-PR_SHEPHERD_NOTIFY_AGENT=your-assistant-agent
+PR_SHEPHERD_ATEAM_PATH=ateam                    # path to ateam binary (default: "ateam")
+PR_SHEPHERD_DATA_DIR=./data
 PR_SHEPHERD_POLL_INTERVAL=180
 PR_SHEPHERD_STALE_HOURS=4
 PR_SHEPHERD_REQUIRED_APPROVALS=1
@@ -222,14 +191,13 @@ PR_SHEPHERD_DEFAULT_REPO=your-org/your-repo
 PR_SHEPHERD_WEBHOOK_URL=https://hooks.slack.com/services/...
 PR_SHEPHERD_REVIEW_INBOX_ENABLED=true
 PR_SHEPHERD_REVIEW_INBOX_USER=your-github-username
-PR_SHEPHERD_REVIEW_INBOX_AGENT=your-assistant-agent
 ```
 
 ## CLI Commands
 
 ```bash
 pr-shepherd start [options]    # Start the polling daemon
-  --dry-run                    # Log without sending messages
+  --dry-run                    # Log without routing events
   --interval <seconds>         # Override poll interval
   -c, --config <path>          # Config file path
 
@@ -253,15 +221,16 @@ pr-shepherd inbox [options]    # Show pending review assignments
 Each discovered PR is tracked through these states:
 
 ```
-OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → MERGED
+OPENED → CI_PENDING → CI_PASSED → AWAITING_REVIEW → APPROVED → AUTO_MERGE_ENABLED → [IN_MERGE_QUEUE] → MERGED
 ```
 
 Key loops and branches:
-- **CI failure**: `CI_PENDING → CI_FAILED` → agent notified → worker pushes fix → `CI_PENDING`
-- **Changes requested**: `AWAITING_REVIEW → CHANGES_REQUESTED` → agent notified → worker fixes → `CI_PENDING`
+- **CI failure**: `CI_PENDING → CI_FAILED` → `ateam route-pr-event` → worker pushes fix → `CI_PENDING`
+- **Changes requested**: `AWAITING_REVIEW → CHANGES_REQUESTED` → `ateam route-pr-event` → worker fixes → `CI_PENDING`
 - **Behind base branch**: `AUTO_MERGE_ENABLED` + `BEHIND` → `gh pr update-branch` → CI re-runs → polls until merged
-- **Merge conflicts**: `AUTO_MERGE_ENABLED` + `CONFLICTING` → escalated to agent
-- **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → agent notified
+- **Merge conflicts**: `AUTO_MERGE_ENABLED` + `CONFLICTING` → escalated via `ateam route-pr-event`
+- **Merge queue** (opt-in via `mergeQueue.enabled`): `AUTO_MERGE_ENABLED` → `IN_MERGE_QUEUE` → informational `ateam route-pr-event`, then merges normally; if dequeued without merging, escalates via `ateam route-pr-event` and returns to `AUTO_MERGE_ENABLED`
+- **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → `ateam route-pr-event`
 - **External auto-merge**: if GitHub shows `autoMergeRequest` already set on an `APPROVED` PR, transitions to `AUTO_MERGE_ENABLED` automatically
 
 Terminal states: `MERGED`, `CLOSED` (reachable from any non-terminal state).
@@ -285,12 +254,13 @@ pr-shepherd/
 │   ├── state-machine.ts     State transitions (pure functions)
 │   ├── state-cache.ts       State persistence (JSON file)
 │   ├── github.ts            GitHub CLI wrapper
-│   ├── notifications.ts     Conductor + webhook notifications
+│   ├── notifications.ts     Webhook + agent notifications
+│   ├── ateam-conductor.ts   Routes events to ateam route-pr-event
 │   ├── review-inbox.ts      Review assignment detection
 │   ├── events.ts            Event log I/O
 │   ├── config.ts            Configuration loader
 │   └── types.ts             Type definitions
-├── test/                    Vitest test suite (113 tests)
+├── test/                    Vitest test suite
 ├── config/
 │   ├── shepherd.example.json
 │   └── system-prompt.txt    Shepherd agent prompt (if running as Claude session)
@@ -303,10 +273,10 @@ pr-shepherd/
 
 ```bash
 npm install
-npm test              # Run test suite (113 tests)
+npm test              # Run test suite
 npm run typecheck     # TypeScript checking
 npm run build         # Compile to dist/
-make start-dry        # Test against real GitHub data without sending messages
+make start-dry        # Test against real GitHub data without routing events
 ```
 
 ## License

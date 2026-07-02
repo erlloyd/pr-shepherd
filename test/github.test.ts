@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot } from "../src/github.js";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus } from "../src/github.js";
+import type { IssueComment } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
 import { readFileSync } from "node:fs";
@@ -14,6 +15,37 @@ function loadFixture<T>(name: string): T {
 function makeConfig(overrides?: Partial<ShepherdConfig>): ShepherdConfig {
   return { ...JSON.parse(JSON.stringify(DEFAULTS)), ...overrides };
 }
+
+function makeComment(createdAt: string, body = "hi"): IssueComment {
+  return { author: "alice", body, createdAt, hasActionableFindings: /❌/.test(body) };
+}
+
+describe("selectNewComments", () => {
+  const comments = [
+    makeComment("2026-06-01T00:00:00Z"),
+    makeComment("2026-06-02T00:00:00Z"),
+    makeComment("2026-06-03T00:00:00Z"),
+  ];
+
+  it("returns all comments when cutoff is null (never notified)", () => {
+    expect(selectNewComments(comments, null)).toHaveLength(3);
+  });
+
+  it("returns only comments strictly newer than the cutoff", () => {
+    const result = selectNewComments(comments, "2026-06-02T00:00:00Z");
+    expect(result).toHaveLength(1);
+    expect(result[0].createdAt).toBe("2026-06-03T00:00:00Z");
+  });
+
+  it("returns empty when all comments are at or before the cutoff", () => {
+    expect(selectNewComments(comments, "2026-06-03T00:00:00Z")).toHaveLength(0);
+  });
+
+  it("preserves order (oldest-first) so the last element is the newest cursor", () => {
+    const result = selectNewComments(comments, null);
+    expect(result[result.length - 1].createdAt).toBe("2026-06-03T00:00:00Z");
+  });
+});
 
 describe("github", () => {
   describe("parseChecks", () => {
@@ -201,6 +233,18 @@ describe("github", () => {
       expect(snapshot.headSha).toBe("abc123def456");
       expect(snapshot.checks).toHaveLength(1);
       expect(snapshot.reviews).toHaveLength(1);
+    });
+  });
+
+  describe("parseMergeQueueStatus", () => {
+    it("returns true when the PR is in the merge queue", () => {
+      const raw = readFileSync(join(FIXTURES, "merge-queue-in-queue.json"), "utf-8");
+      expect(parseMergeQueueStatus(raw)).toBe(true);
+    });
+
+    it("returns false when the PR is not in the merge queue", () => {
+      const raw = readFileSync(join(FIXTURES, "merge-queue-not-in-queue.json"), "utf-8");
+      expect(parseMergeQueueStatus(raw)).toBe(false);
     });
   });
 });

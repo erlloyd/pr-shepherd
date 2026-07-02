@@ -7,6 +7,7 @@ export type PRState =
   | "CHANGES_REQUESTED"
   | "APPROVED"
   | "AUTO_MERGE_ENABLED"
+  | "IN_MERGE_QUEUE"
   | "STALE"
   | "MERGED"
   | "CLOSED";
@@ -20,6 +21,8 @@ export type PREvent =
   | "changes_requested"
   | "all_approved"
   | "auto_merge_enabled"
+  | "entered_merge_queue"
+  | "left_queue"
   | "merged"
   | "closed"
   | "new_commit"
@@ -42,6 +45,8 @@ export type WatchedPR = {
   lastEventAt: string | null;
   lastBotCommentNotifiedAt: string | null;
   botFeedbackCount: number;
+  lastReviewerCommentNotifiedAt: string | null;
+  lastReviewerReviewCommentNotifiedAt: string | null;
 };
 
 export type PREventRecord = {
@@ -129,17 +134,20 @@ export type ShepherdConfig = {
   staleThresholdHours: number;
   requiredApprovals: number;
   mergeStrategy: MergeStrategy;
+  autoMerge: boolean;
   dryRun: boolean;
   dataDir: string;
 
   github: {
     defaultRepo: string | null;
     authorUsername: string | null;
+    ignoreRepos: string[];
   };
 
   reviews: {
     ignoreUsers: string[];
     botUsers: string[];
+    reviewerUsers: string[];
   };
 
   checks: {
@@ -155,11 +163,6 @@ export type ShepherdConfig = {
     onCIFailure: boolean;
     onStale: boolean;
     onApproval: boolean;
-  };
-
-  agent: {
-    conductorUrl: string | null;
-    shepherdPane: string | null;
   };
 
   reviewInbox: {
@@ -185,5 +188,9 @@ export type ShepherdConfig = {
     enabled: boolean;
     escalateAfterHours: number;
     businessDaysOnly: boolean;
+  };
+
+  mergeQueue: {
+    enabled: boolean;
   };
 };

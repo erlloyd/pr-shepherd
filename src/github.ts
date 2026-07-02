@@ -74,6 +74,33 @@ export function fetchReviews(number: number, repo: string): RawReview[] {
   return data.reviews;
 }
 
+export function parseMergeQueueStatus(json: string): boolean {
+  const data = JSON.parse(json) as {
+    data: { repository: { pullRequest: { isInMergeQueue: boolean } } };
+  };
+  return data.data.repository.pullRequest.isInMergeQueue;
+}
+
+// isInMergeQueue is only exposed via GraphQL, not gh pr view --json.
+export function fetchMergeQueueStatus(number: number, repo: string): boolean {
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){isInMergeQueue}}}";
+  const json = gh([
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `number=${number}`,
+  ]);
+  return parseMergeQueueStatus(json);
+}
+
 export function enableAutoMerge(
   number: number,
   repo: string,
@@ -91,41 +118,53 @@ export function postComment(number: number, repo: string, body: string): void {
   gh(["pr", "comment", String(number), "-R", repo, "--body", body]);
 }
 
-export type BotComment = {
+export type IssueComment = {
   author: string;
   body: string;
   createdAt: string;
   hasActionableFindings: boolean;
 };
 
-export function fetchBotComments(
+// kind selects the GitHub endpoint: "issue" = PR conversation comments
+// (issues/{n}/comments), "review" = inline diff-thread review comments
+// (pulls/{n}/comments). Both return the same {user, body, created_at} shape.
+export function fetchCommentsByUsers(
   number: number,
   repo: string,
-  botUsers: string[],
-): BotComment[] {
-  if (botUsers.length === 0) return [];
+  users: string[],
+  kind: "issue" | "review" = "issue",
+): IssueComment[] {
+  if (users.length === 0) return [];
   const [owner, name] = repo.split("/");
-  const json = gh([
-    "api",
-    `repos/${owner}/${name}/issues/${number}/comments`,
-    "--jq",
-    ".",
-  ]);
+  const path =
+    kind === "review"
+      ? `repos/${owner}/${name}/pulls/${number}/comments`
+      : `repos/${owner}/${name}/issues/${number}/comments`;
+  const json = gh(["api", path, "--jq", "."]);
   const comments = JSON.parse(json) as Array<{
     user: { login: string };
     body: string;
     created_at: string;
   }>;
 
-  const botSet = new Set(botUsers.map((u) => u.toLowerCase()));
+  const userSet = new Set(users.map((u) => u.toLowerCase()));
   return comments
-    .filter((c) => botSet.has(c.user.login.toLowerCase()))
+    .filter((c) => userSet.has(c.user.login.toLowerCase()))
     .map((c) => ({
       author: c.user.login,
       body: c.body,
       createdAt: c.created_at,
       hasActionableFindings: /❌/.test(c.body),
     }));
+}
+
+// Comments newer than the last-notified cursor, oldest-first. cutoff null = never notified.
+export function selectNewComments(
+  comments: IssueComment[],
+  cutoff: string | null,
+): IssueComment[] {
+  const since = cutoff ?? "1970-01-01T00:00:00Z";
+  return comments.filter((c) => c.createdAt > since);
 }
 
 export function fetchCommits(

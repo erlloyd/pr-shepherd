@@ -87,9 +87,17 @@ export function routeToAgent(
       args.push("--pr-url", prUrl);
     }
 
-    execFileSync(ateam, args, { encoding: "utf-8", timeout: 30_000 });
+    console.log(`[pr-shepherd][debug] exec: ${ateam} ${args.join(" ")}`);
+
+    const output = execFileSync(ateam, args, { encoding: "utf-8", timeout: 30_000, stdio: ["pipe", "pipe", "pipe"] });
+    if (output && output.trim()) {
+      console.log(`[pr-shepherd][debug] route-pr-event stdout: ${output.trim()}`);
+    }
+    console.log(`[pr-shepherd][debug] route-pr-event exited successfully`);
   } catch (err) {
-    console.log(`[pr-shepherd] ateam route-pr-event failed for PR #${prNumber}: ${(err as Error).message}`);
+    const error = err as Error & { stdout?: string; stderr?: string };
+    const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim();
+    console.log(`[pr-shepherd] ateam route-pr-event failed for PR #${prNumber}: ${error.message}${captured ? `\n${captured}` : ""}`);
   } finally {
     try { unlinkSync(tmpFile); } catch { /* ignore */ }
   }

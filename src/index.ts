@@ -6,6 +6,11 @@ import { startDaemon, discoverAuthoredPRs } from "./daemon.js";
 import { readEvents, readEventsForPR } from "./events.js";
 import { readCache } from "./state-cache.js";
 import { readInbox } from "./review-inbox.js";
+import { existsSync } from "node:fs";
+
+// Auto-load .env (e.g. PR_SHEPHERD_ATEAM_PATH) from the working dir if present.
+// Existing process.env values take precedence.
+if (existsSync(".env")) process.loadEnvFile(".env");
 
 const program = new Command();
 
