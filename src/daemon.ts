@@ -251,6 +251,29 @@ async function handleReviewerComments(config: ShepherdConfig, pr: WatchedPR): Pr
   return true;
 }
 
+// Handles a live PR view showing MERGED/CLOSED, whatever our cached state.
+// Returns true if it matched (and was therefore fully handled + removed from
+// cache) so callers can skip further processing for this PR.
+async function checkMergedOrClosed(
+  config: ShepherdConfig,
+  pr: WatchedPR,
+  prView: { state: string },
+): Promise<boolean> {
+  if (prView.state === "MERGED") {
+    tryTransition(config, pr, "merged");
+    await handleTransition(config, pr, "MERGED", {});
+    return true;
+  }
+
+  if (prView.state === "CLOSED") {
+    tryTransition(config, pr, "closed");
+    await handleTransition(config, pr, "CLOSED", {});
+    return true;
+  }
+
+  return false;
+}
+
 export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<void> {
   if (isTerminal(pr.state)) return;
 
@@ -262,18 +285,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
     const checks = parseChecks(rawChecks, config);
     const reviews = parseReviews(rawReviews, config);
 
-    if (prView.state === "MERGED") {
-      const prev = pr.state;
-      tryTransition(config, pr, "merged");
-      await handleTransition(config, pr, "MERGED", {});
-      return;
-    }
-
-    if (prView.state === "CLOSED") {
-      tryTransition(config, pr, "closed");
-      await handleTransition(config, pr, "CLOSED", {});
-      return;
-    }
+    if (await checkMergedOrClosed(config, pr, prView)) return;
 
     if (pr.headSha && prView.headRefOid !== pr.headSha) {
       pr.headSha = prView.headRefOid;
@@ -481,13 +493,26 @@ export async function pollAll(config: ShepherdConfig): Promise<void> {
     await pollPR(config, pr);
   }
 
-  // Clean up cached PRs that are no longer in the open set
+  // Reconcile cached PRs that dropped out of the open set — this happens
+  // whenever a PR merges or closes fast enough (e.g. via a merge queue) that
+  // it's already gone from `--state=open` search results by the next poll,
+  // meaning pollPR never runs for it again and never sees the MERGED/CLOSED
+  // transition. Fetch its live state directly so it still gets notified
+  // instead of vanishing from the cache with no signal.
   const openKeys = new Set(openPRs.map((p) => `${p.repository.nameWithOwner}#${p.number}`));
   const cached = readCache(config.dataDir);
   for (const pr of cached) {
     const key = `${pr.repo}#${pr.number}`;
-    if (!openKeys.has(key) && !isTerminal(pr.state)) {
-      log(`PR #${pr.number} (${pr.repo}) no longer open — removing from cache.`);
+    if (openKeys.has(key) || isTerminal(pr.state)) continue;
+
+    try {
+      const prView = fetchPRView(pr.number, pr.repo);
+      const handled = await checkMergedOrClosed(config, pr, prView);
+      if (!handled) {
+        log(`PR #${pr.number} (${pr.repo}) missing from open search but still ${prView.state} — leaving cached for next poll.`);
+      }
+    } catch (err) {
+      log(`PR #${pr.number} (${pr.repo}) no longer open and its live state could not be fetched (${(err as Error).message}) — removing from cache.`);
       removeCachedPR(config.dataDir, pr.number, pr.repo);
     }
   }
