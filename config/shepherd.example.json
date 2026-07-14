@@ -13,5 +13,9 @@
   "reviewInbox": {
     "enabled": false,
     "githubUser": "your-github-username"
+  },
+
+  "replyWatch": {
+    "enabled": true
   }
 }

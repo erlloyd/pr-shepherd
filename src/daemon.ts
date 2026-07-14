@@ -19,6 +19,7 @@ import { transition, isTerminal } from "./state-machine.js";
 import { sendToAgent } from "./notifications.js";
 import { pollReviewInbox } from "./review-inbox.js";
 import { pollReviewFollowUps } from "./review-followup.js";
+import { pollReplyWatch } from "./reply-watch.js";
 import { pollReviewerNudges, registerNudge } from "./reviewer-nudge.js";
 import {
   formatCIFailureMessage,
@@ -533,16 +534,21 @@ export async function startDaemon(config: ShepherdConfig): Promise<void> {
   if (config.reviewerNudge.enabled) {
     log(`Reviewer nudge enabled (escalate after ${config.reviewerNudge.escalateAfterHours}h${config.reviewerNudge.businessDaysOnly ? ", business days only" : ""})`);
   }
+  if (config.replyWatch.enabled) {
+    log(`Reply watch enabled for @${config.reviewInbox.githubUser ?? config.github.authorUsername}`);
+  }
 
   await pollAll(config);
   await pollReviewInbox(config);
   await pollReviewFollowUps(config);
   await pollReviewerNudges(config);
+  await pollReplyWatch(config);
 
   setInterval(async () => {
     await pollAll(config);
     await pollReviewInbox(config);
     await pollReviewFollowUps(config);
     await pollReviewerNudges(config);
+    await pollReplyWatch(config);
   }, config.pollIntervalSeconds * 1000);
 }

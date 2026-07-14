@@ -190,7 +190,7 @@ export function fetchReviewThreadComments(
   repo: string,
 ): ReviewThreadComment[] {
   const [owner, name] = repo.split("/");
-  const json = gh(["api", `repos/${owner}/${name}/pulls/${number}/comments`, "--jq", "."]);
+  const json = gh(["api", `repos/${owner}/${name}/pulls/${number}/comments?per_page=100`, "--jq", "."]);
   const comments = JSON.parse(json) as Array<{
     id: number;
     in_reply_to_id?: number;

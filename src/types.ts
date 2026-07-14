@@ -27,7 +27,8 @@ export type PREvent =
   | "closed"
   | "new_commit"
   | "stale_detected"
-  | "review_requested";
+  | "review_requested"
+  | "comment_reply";
 
 export const TERMINAL_STATES: ReadonlySet<PRState> = new Set([
   "MERGED",
@@ -129,6 +130,12 @@ export type ReviewerNudge = {
   status: "pending_comment" | "waiting" | "responded" | "closed";
 };
 
+export type ReplyWatchRecord = {
+  number: number;
+  repo: string;
+  lastReplyNotifiedAt: string | null;
+};
+
 export type MergeStrategy = "squash" | "merge" | "rebase";
 
 export type ShepherdConfig = {
@@ -179,6 +186,10 @@ export type ShepherdConfig = {
   };
 
   reviewFollowUp: {
+    enabled: boolean;
+  };
+
+  replyWatch: {
     enabled: boolean;
   };
 

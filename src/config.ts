@@ -53,6 +53,10 @@ const DEFAULTS: ShepherdConfig = {
     enabled: false,
   },
 
+  replyWatch: {
+    enabled: true,
+  },
+
   botFeedback: {
     maxAttempts: 2,
   },
