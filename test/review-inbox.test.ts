@@ -4,6 +4,7 @@ import {
   writeInbox,
   formatReviewAssignmentMessage,
   pollReviewInbox,
+  latestUserReviewAt,
 } from "../src/review-inbox.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -205,5 +206,166 @@ describe("pollReviewInbox dry-run", () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0].notifiedAt).toBeNull();
     expect(persisted[0].status).toBe("dispatched");
+  });
+});
+
+describe("re-review on re-request", () => {
+  const TMP_RR = join(import.meta.dirname, "__tmp_review_inbox_rereview");
+
+  const searchResult = JSON.stringify([
+    {
+      number: 42,
+      repository: { name: "widgets", nameWithOwner: "acme/widgets" },
+      title: "feat: add widget sorting",
+      url: "https://github.com/acme/widgets/pull/42",
+      isDraft: false,
+      updatedAt: new Date().toISOString(),
+    },
+  ]);
+
+  beforeEach(() => {
+    mkdirSync(TMP_RR, { recursive: true });
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    rmSync(TMP_RR, { recursive: true, force: true });
+  });
+
+  it("flips review_submitted to re_review_dispatched and dispatches with transition re_review", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({ status: "review_submitted", completedAt: "2026-07-01T00:00:00Z" }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const [, msg, opts] = mockedRoute.mock.calls[0];
+    expect(msg).toContain("Re-review requested");
+    expect(msg).toContain("https://github.com/acme/widgets/pull/42");
+    expect(opts).toEqual({ transition: "re_review" });
+
+    const persisted = readInbox(TMP_RR);
+    expect(persisted[0].status).toBe("re_review_dispatched");
+    expect(persisted[0].reReviewDispatchedAt).toBeTruthy();
+  });
+
+  it("does not re-dispatch while a re-review is pending", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({
+        status: "re_review_dispatched",
+        reReviewDispatchedAt: "2026-07-14T00:00:00Z",
+      }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>) // getPRState
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [{ author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-10T00:00:00Z" }],
+        }) as unknown as ReturnType<typeof execFileSync>, // latestUserReviewAt — older than dispatch
+      );
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    expect(readInbox(TMP_RR)[0]?.status ?? "re_review_dispatched").toBe("re_review_dispatched");
+  });
+
+  it("completes the re-review when a newer review of ours exists", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({
+        status: "re_review_dispatched",
+        reReviewDispatchedAt: "2026-07-14T00:00:00Z",
+      }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests — PR left the search
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>) // getPRState
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [
+            { author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-10T00:00:00Z" },
+            { author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-14T12:00:00Z" },
+          ],
+        }) as unknown as ReturnType<typeof execFileSync>, // latestUserReviewAt — newer
+      );
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    const persisted = readInbox(TMP_RR);
+    expect(persisted[0].status).toBe("review_submitted");
+    expect(persisted[0].completedAt).toBeTruthy();
+  });
+
+  it("creates a re_review_dispatched record when no inbox record exists but we already reviewed", async () => {
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [{ author: { login: "testuser" }, state: "COMMENTED" }],
+        }) as unknown as ReturnType<typeof execFileSync>, // hasUserReviewed → true
+      )
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const persisted = readInbox(TMP_RR);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].status).toBe("re_review_dispatched");
+    expect(persisted[0].reReviewDispatchedAt).toBeTruthy();
+  });
+
+  it("notifies to free the worker when the PR merges during a re-review", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({
+        status: "re_review_dispatched",
+        reReviewDispatchedAt: "2026-07-14T00:00:00Z",
+      }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "MERGED" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
+
+    // notifyAgent short-circuits without a configured agent — set one so the
+    // free-worker message reaches routeToAgent.
+    const config = makePollConfig({ dataDir: TMP_RR, dryRun: false });
+    config.reviewInbox.notifyAgent = "conductor";
+    await pollReviewInbox(config);
+
+    // notifyAgent → sendToAgent → routeToAgent (mocked)
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    expect(mockedRoute.mock.calls[0][1]).toContain("no longer needed");
+    expect(readInbox(TMP_RR)[0].status).toBe("merged_before_review");
+  });
+});
+
+describe("latestUserReviewAt", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns the newest submittedAt among our reviews", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({
+        reviews: [
+          { author: { login: "TestUser" }, submittedAt: "2026-07-10T00:00:00Z" },
+          { author: { login: "someoneelse" }, submittedAt: "2026-07-15T00:00:00Z" },
+          { author: { login: "testuser" }, submittedAt: "2026-07-12T00:00:00Z" },
+        ],
+      }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-12T00:00:00Z");
+  });
+
+  it("returns null when we have no reviews or gh fails", () => {
+    mockedExec.mockReturnValueOnce(JSON.stringify({ reviews: [] }) as unknown as ReturnType<typeof execFileSync>);
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBeNull();
+    mockedExec.mockImplementationOnce(() => {
+      throw new Error("gh failed");
+    });
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBeNull();
   });
 });

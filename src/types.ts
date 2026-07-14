@@ -89,6 +89,7 @@ export type PRSnapshot = {
 export type ReviewAssignmentStatus =
   | "pending_bot_review"
   | "dispatched"
+  | "re_review_dispatched"
   | "review_submitted"
   | "merged_before_review"
   | "closed";
@@ -101,6 +102,7 @@ export type ReviewAssignment = {
   detectedAt: string;
   notifiedAt: string | null;
   completedAt: string | null;
+  reReviewDispatchedAt?: string | null;
   status: ReviewAssignmentStatus;
 };
 

@@ -71,6 +71,27 @@ export function hasUserReviewed(number: number, repo: string, githubUser: string
   }
 }
 
+export function latestUserReviewAt(number: number, repo: string, githubUser: string): string | null {
+  try {
+    const json = execFileSync(
+      "gh",
+      ["pr", "view", String(number), "-R", repo, "--json", "reviews"],
+      { encoding: "utf-8", timeout: 15_000 },
+    ).trim();
+    const { reviews } = JSON.parse(json) as {
+      reviews: Array<{ author: { login: string }; submittedAt?: string }>;
+    };
+    const ours = reviews
+      .filter((r) => r.author.login.toLowerCase() === githubUser.toLowerCase())
+      .map((r) => r.submittedAt)
+      .filter((t): t is string => Boolean(t))
+      .sort();
+    return ours.length > 0 ? ours[ours.length - 1] : null;
+  } catch {
+    return null;
+  }
+}
+
 function getPRState(number: number, repo: string): string {
   try {
     const json = execFileSync(
@@ -120,7 +141,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
   try {
     const results = fetchReviewRequests(config.reviewInbox.githubUser);
     const inbox = readInbox(config.dataDir);
-    const existingKeys = new Set(inbox.map((a) => inboxKey(a.number, a.repo)));
+    const byKey = new Map(inbox.map((a) => [inboxKey(a.number, a.repo), a]));
     const username = config.reviewInbox.githubUser;
     const waitForBot = config.reviewInbox.waitForBot;
 
@@ -128,17 +149,48 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
     const cutoff = Date.now() - maxAgeMs;
     let updated = false;
 
-    // Discover new assignments
+    // Discover new assignments and re-requests
     for (const pr of results) {
       if (config.reviewInbox.ignoreDrafts && pr.isDraft) continue;
       if (config.reviewInbox.ignoreRepos.includes(pr.repository.nameWithOwner)) continue;
       if (new Date(pr.updatedAt).getTime() < cutoff) continue;
 
       const key = inboxKey(pr.number, pr.repository.nameWithOwner);
-      if (existingKeys.has(key)) continue;
+      const existing = byKey.get(key);
+
+      if (existing) {
+        // A PR we already reviewed reappearing in the review-requested search
+        // means the author re-requested review — GitHub drops a reviewer from
+        // requested_reviewers when their review posts and re-adds them on
+        // re-request.
+        if (existing.status === "review_submitted") {
+          existing.status = "re_review_dispatched";
+          existing.reReviewDispatchedAt = null;
+          existing.completedAt = null;
+          updated = true;
+          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested.`);
+        }
+        continue;
+      }
 
       if (hasUserReviewed(pr.number, pr.repository.nameWithOwner, username)) {
-        log(`Skipping PR #${pr.number} (${pr.repository.nameWithOwner}) — already reviewed`);
+        // Already reviewed but no inbox record (pruned, or reviewed before the
+        // daemon existed) — same re-request signal.
+        const assignment: ReviewAssignment = {
+          number: pr.number,
+          repo: pr.repository.nameWithOwner,
+          title: pr.title,
+          url: pr.url,
+          detectedAt: new Date().toISOString(),
+          notifiedAt: null,
+          completedAt: null,
+          reReviewDispatchedAt: null,
+          status: "re_review_dispatched",
+        };
+        inbox.push(assignment);
+        byKey.set(key, assignment);
+        updated = true;
+        log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested (no prior inbox record).`);
         continue;
       }
 
@@ -154,11 +206,12 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         detectedAt: new Date().toISOString(),
         notifiedAt: null,
         completedAt: null,
+        reReviewDispatchedAt: null,
         status: initialStatus,
       };
 
       inbox.push(assignment);
-      existingKeys.add(key);
+      byKey.set(key, assignment);
       updated = true;
 
       if (initialStatus === "pending_bot_review") {
@@ -179,7 +232,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         const prState = getPRState(assignment.number, assignment.repo);
 
         if (prState === "MERGED" || prState === "CLOSED") {
-          if (assignment.status === "dispatched") {
+          if (assignment.status === "dispatched" || assignment.status === "re_review_dispatched") {
             const msg = [
               `[PR Shepherd] Review no longer needed: PR #${assignment.number} (${assignment.repo})`,
               `"${assignment.title}"`,
@@ -226,6 +279,29 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
           continue;
         }
 
+        // Check if our re-review has been posted (a review newer than the
+        // re-dispatch timestamp — posting it is also what removes us from the
+        // review-requested search)
+        if (assignment.status === "re_review_dispatched" && assignment.reReviewDispatchedAt) {
+          const latest = latestUserReviewAt(assignment.number, assignment.repo, username);
+          if (latest && new Date(latest).getTime() > new Date(assignment.reReviewDispatchedAt).getTime()) {
+            const msg = [
+              `[PR Shepherd] Re-review complete: PR #${assignment.number} (${assignment.repo})`,
+              `"${assignment.title}"`,
+              "",
+              "Our follow-up review has been submitted. Please free the worker assigned to this review.",
+            ].join("\n");
+            log(`PR #${assignment.number} — re-review submitted. Notifying to free worker.`);
+            if (!config.dryRun) {
+              await notifyAgent(config, msg);
+            }
+            assignment.status = "review_submitted";
+            assignment.completedAt = new Date().toISOString();
+            updated = true;
+            continue;
+          }
+        }
+
         // Handle pending_bot_review → check if bot has posted
         if (assignment.status === "pending_bot_review" && waitForBot) {
           if (!botHasReviewed(assignment.number, assignment.repo, waitForBot)) {
@@ -270,6 +346,29 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
             });
           }
         }
+
+        // Dispatch re-review notifications
+        if (assignment.status === "re_review_dispatched" && !assignment.reReviewDispatchedAt) {
+          const msg = formatReReviewMessage(assignment);
+          if (config.dryRun) {
+            log(`[dry-run] would dispatch re-review of PR #${assignment.number} (${assignment.repo}) to ateam`);
+          } else {
+            routeToAgent(config, msg, { transition: "re_review" });
+            assignment.reReviewDispatchedAt = new Date().toISOString();
+            updated = true;
+            log(`Re-review dispatched: PR #${assignment.number} (${assignment.repo})`);
+
+            appendEvent(config.dataDir, {
+              ts: assignment.reReviewDispatchedAt,
+              pr: assignment.number,
+              repo: assignment.repo,
+              event: "review_requested",
+              from: "OPENED",
+              to: "OPENED",
+              details: { type: "re_review_inbox", title: assignment.title, url: assignment.url },
+            });
+          }
+        }
       } catch (err) {
         log(`Error processing assignment PR #${assignment.number}: ${(err as Error).message}`);
       }
@@ -278,7 +377,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
     // Prune terminal assignments older than 7 days
     const pruneThreshold = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const active = inbox.filter((a) => {
-      if (a.status === "pending_bot_review" || a.status === "dispatched") return true;
+      if (a.status === "pending_bot_review" || a.status === "dispatched" || a.status === "re_review_dispatched") return true;
       if (a.completedAt && new Date(a.completedAt).getTime() < pruneThreshold) return false;
       return true;
     });
@@ -320,4 +419,15 @@ function formatReviewAssignmentMessage(assignment: ReviewAssignment): string {
   ].join("\n");
 }
 
-export { formatReviewAssignmentMessage };
+function formatReReviewMessage(assignment: ReviewAssignment): string {
+  return [
+    `[PR Shepherd] Re-review requested: PR #${assignment.number} (${assignment.repo})`,
+    `"${assignment.title}"`,
+    assignment.url,
+    "",
+    "You previously reviewed this PR. The author has addressed the findings and re-requested review.",
+    "Verify each previously raised finding was addressed by the new commits and post a short follow-up review with the outcome per finding. Do not raise new findings.",
+  ].join("\n");
+}
+
+export { formatReviewAssignmentMessage, formatReReviewMessage };
