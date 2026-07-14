@@ -30,7 +30,9 @@ A single long-running Node.js process with two polling loops on a shared interva
 
 3. **Review follow-up** — tracks PRs where we left `CHANGES_REQUESTED` reviews. When the author pushes new commits, notifies the agent for a scoped re-review (only check previously raised issues, no new findings). Stops on approval.
 
-4. **Reviewer nudge** — when a worker pushes fixes on an authored PR that had `CHANGES_REQUESTED` reviews, posts a GitHub @mention to the reviewer. Escalates to the agent after configurable hours (business days only) if no response.
+5. **Reply watch** — scans inline review-comment threads on PRs we reviewed (`gh search prs --reviewed-by`) and our watched authored PRs. When someone replies in a thread our identity participated in (newer than our last comment in that thread), forwards the reply to the owning initiative via `--transition comment_reply`: an open initiative gets mail; a closed review initiative is reopened and its session relaunched in comment-reply mode to respond in-thread; no initiative → dropped. Cursor per PR in `data/reply-watch.json`.
+
+6. **Reviewer nudge** — when a worker pushes fixes on an authored PR that had `CHANGES_REQUESTED` reviews, posts a GitHub @mention to the reviewer. Escalates to the agent after configurable hours (business days only) if no response.
 
 Communication is via HTTP POST to a conductor MCP endpoint (`send_to_agent`). If no conductor is configured, messages go to stdout.
 
@@ -43,6 +45,7 @@ Communication is via HTTP POST to a conductor MCP endpoint (`send_to_agent`). If
 | `src/state-cache.ts` | JSON file persistence for PR state between polls |
 | `src/github.ts` | `gh` CLI wrapper — checks, reviews, PR state, auto-merge, branch updates |
 | `src/review-inbox.ts` | Review assignment detection + dedup + already-reviewed filter |
+| `src/reply-watch.ts` | Inline review-comment thread scan + reply dispatch |
 | `src/notifications.ts` | Sends messages via conductor MCP or logs to stdout |
 | `src/config.ts` | Config loader: CLI flags → env vars → config file → defaults |
 | `src/types.ts` | All type definitions |
@@ -86,7 +89,7 @@ make inbox          # Pending review assignments
 ## Tests
 
 ```bash
-npm test            # 163 tests across 8 files
+npm test            # 182 tests across 9 files
 npm run typecheck   # Clean TypeScript check
 ```
 
@@ -97,3 +100,4 @@ State machine has 81 tests covering every transition, terminal state, and full l
 - `data/pr-state-cache.json` — last-known state per discovered PR
 - `data/pr-events.jsonl` — append-only audit log
 - `data/review-inbox.json` — already-notified review assignments (dedup)
+- `data/reply-watch.json` — per-PR last-comment cursors for reply-watch threads
