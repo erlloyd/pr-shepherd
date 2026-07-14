@@ -113,6 +113,39 @@ describe("findNewReplies", () => {
   });
 });
 
+describe("formatReplyMessage", () => {
+  it("quotes multi-line reply bodies line-by-line and includes the thread id in the block header", () => {
+    const target = {
+      number: 7,
+      repo: "acme/widgets",
+      title: "feat: sorting",
+      url: "https://github.com/acme/widgets/pull/7",
+      authored: false,
+    };
+    const replies = [
+      {
+        rootId: 100,
+        path: "src/a.ts",
+        author: "alice",
+        body: "line one\nline two\nline three",
+        createdAt: "2026-07-14T11:00:00Z",
+      },
+    ];
+
+    const msg = formatReplyMessage(target, replies);
+
+    expect(msg).toContain("thread 100");
+    expect(msg).toContain("> line one");
+    expect(msg).toContain("> line two");
+    expect(msg).toContain("> line three");
+    // Each quoted line appears on its own line, in order.
+    const lines = msg.split("\n");
+    const idx = lines.indexOf("> line one");
+    expect(lines[idx + 1]).toBe("> line two");
+    expect(lines[idx + 2]).toBe("> line three");
+  });
+});
+
 describe("pollReplyWatch", () => {
   const TMP_RW = join(import.meta.dirname, "__tmp_reply_watch");
 
@@ -161,7 +194,12 @@ describe("pollReplyWatch", () => {
 
   beforeEach(() => {
     mkdirSync(TMP_RW, { recursive: true });
-    vi.clearAllMocks();
+    // resetAllMocks (not clearAllMocks) so leftover queued
+    // mockReturnValueOnce values from a prior test's unconsumed queue
+    // (e.g. seeding-skip tests that make fewer exec calls than queued)
+    // don't bleed into the next test.
+    vi.resetAllMocks();
+    mockedRoute.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -169,6 +207,13 @@ describe("pollReplyWatch", () => {
   });
 
   it("dispatches new replies with transition comment_reply and advances the cursor", async () => {
+    // Pre-seed so this PR isn't treated as a first-run discovery (which would
+    // seed-and-skip per Fix 5) — exercises the normal scan/dispatch path.
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 7, repo: "acme/widgets", lastReplyNotifiedAt: "2026-07-14T00:00:00Z" }]),
+    );
     mockedExec
       .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // reviewed-by search
       .mockReturnValueOnce(threadWithReply as unknown as ReturnType<typeof execFileSync>); // pulls/7/comments
@@ -232,6 +277,140 @@ describe("pollReplyWatch", () => {
     expect(state).toHaveLength(0);
   });
 
+  it("seeds a first-discovered PR without scanning it, and skips no historical backfill", async () => {
+    mockedExec.mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>); // reviewed-by search only
+
+    await pollReplyWatch(makeConfig());
+
+    // Only the search call — no fetchReviewThreadComments call for the newly
+    // discovered PR.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedRoute).not.toHaveBeenCalled();
+
+    const { readFileSync } = await import("node:fs");
+    const state = JSON.parse(readFileSync(join(TMP_RW, "reply-watch.json"), "utf-8")) as Array<{
+      number: number;
+      repo: string;
+      lastReplyNotifiedAt: string | null;
+    }>;
+    expect(state).toHaveLength(1);
+    expect(state[0].number).toBe(7);
+    expect(state[0].lastReplyNotifiedAt).not.toBeNull();
+  });
+
+  it("does not advance the cursor when routeToAgent fails, and retries on the next poll", async () => {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 7, repo: "acme/widgets", lastReplyNotifiedAt: "2026-07-14T00:00:00Z" }]),
+    );
+    mockedRoute.mockReturnValueOnce(false);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>)
+      .mockReturnValueOnce(threadWithReply as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(makeConfig());
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const { readFileSync } = await import("node:fs");
+    const afterFail = JSON.parse(readFileSync(join(TMP_RW, "reply-watch.json"), "utf-8"));
+    expect(afterFail[0].lastReplyNotifiedAt).toBe("2026-07-14T00:00:00Z");
+
+    // Second poll with the same reply still pending (cursor unmoved) —
+    // dispatches again.
+    mockedRoute.mockReturnValueOnce(true);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>)
+      .mockReturnValueOnce(threadWithReply as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(makeConfig());
+
+    expect(mockedRoute).toHaveBeenCalledTimes(2);
+    const afterRetry = JSON.parse(readFileSync(join(TMP_RW, "reply-watch.json"), "utf-8"));
+    expect(afterRetry[0].lastReplyNotifiedAt).toBe("2026-07-14T11:00:00Z");
+  });
+
+  it("filters out replies from configured reviewerUsers on authored PRs (double-dispatch guard)", async () => {
+    const watched: WatchedPR = {
+      number: 12,
+      repo: "acme/ours",
+      title: "our feature",
+      url: "https://github.com/acme/ours/pull/12",
+      state: "AWAITING_REVIEW",
+      headSha: null,
+      lastCheckedAt: null,
+      lastEventAt: null,
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+    writeCache(TMP_RW, [watched]);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 12, repo: "acme/ours", lastReplyNotifiedAt: "2026-07-14T09:00:00Z" }]),
+    );
+
+    const threadWithTwoReplies = JSON.stringify([
+      { id: 200, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T09:00:00Z", path: "src/b.ts" },
+      { id: 201, in_reply_to_id: 200, user: { login: "reviewer-bob" }, body: "already handled via review stream", created_at: "2026-07-14T10:00:00Z", path: "src/b.ts" },
+      { id: 202, in_reply_to_id: 200, user: { login: "alice" }, body: "a genuine reply-watch reply", created_at: "2026-07-14T11:00:00Z", path: "src/b.ts" },
+    ]);
+
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // reviewed-by search: empty
+      .mockReturnValueOnce(threadWithTwoReplies as unknown as ReturnType<typeof execFileSync>); // pulls/12/comments
+
+    await pollReplyWatch(makeConfig({ reviews: { ignoreUsers: [], botUsers: [], reviewerUsers: ["Reviewer-Bob"] } }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const msg = mockedRoute.mock.calls[0][1];
+    expect(msg).toContain("@alice");
+    expect(msg).toContain("a genuine reply-watch reply");
+    expect(msg).not.toContain("reviewer-bob");
+    expect(msg).not.toContain("already handled via review stream");
+  });
+
+  it("suppresses dispatch entirely when every reply on an authored PR is from a reviewerUser", async () => {
+    const watched: WatchedPR = {
+      number: 13,
+      repo: "acme/ours",
+      title: "our other feature",
+      url: "https://github.com/acme/ours/pull/13",
+      state: "AWAITING_REVIEW",
+      headSha: null,
+      lastCheckedAt: null,
+      lastEventAt: null,
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+    writeCache(TMP_RW, [watched]);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 13, repo: "acme/ours", lastReplyNotifiedAt: "2026-07-14T09:00:00Z" }]),
+    );
+
+    const threadReviewerOnly = JSON.stringify([
+      { id: 300, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T09:00:00Z", path: "src/c.ts" },
+      { id: 301, in_reply_to_id: 300, user: { login: "reviewer-bob" }, body: "handled elsewhere", created_at: "2026-07-14T10:00:00Z", path: "src/c.ts" },
+    ]);
+
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>)
+      .mockReturnValueOnce(threadReviewerOnly as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(makeConfig({ reviews: { ignoreUsers: [], botUsers: [], reviewerUsers: ["reviewer-bob"] } }));
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    const { readFileSync } = await import("node:fs");
+    const state = JSON.parse(readFileSync(join(TMP_RW, "reply-watch.json"), "utf-8"));
+    expect(state[0].lastReplyNotifiedAt).toBe("2026-07-14T09:00:00Z");
+  });
+
   it("includes watched authored PRs in the scan population", async () => {
     const watched: WatchedPR = {
       number: 12,
@@ -248,6 +427,11 @@ describe("pollReplyWatch", () => {
       lastReviewerReviewCommentNotifiedAt: null,
     };
     writeCache(TMP_RW, [watched]);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 12, repo: "acme/ours", lastReplyNotifiedAt: "2026-07-14T00:00:00Z" }]),
+    );
     mockedExec
       .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // reviewed-by search: empty
       .mockReturnValueOnce(threadWithReply as unknown as ReturnType<typeof execFileSync>); // pulls/12/comments

@@ -182,23 +182,38 @@ export type ReviewThreadComment = {
   path: string;
 };
 
+type RawReviewThreadComment = {
+  id: number;
+  in_reply_to_id?: number;
+  user: { login: string };
+  body: string;
+  created_at: string;
+  path: string;
+};
+
 // All inline review-comment thread comments for a PR. Replies carry
 // in_reply_to_id pointing at the thread ROOT comment (GitHub flattens
 // nesting), so thread grouping is `inReplyToId ?? id`.
+//
+// `per_page=100` alone caps at one page — on busy PRs the newest comments
+// (added last) would fall off first. Paginate with `--slurp`, which is
+// available on this gh version (`gh api --help`): it wraps each page's JSON
+// array into an outer array, so the result is an array of pages that we
+// flatten. (If `--slurp` weren't available, the fallback would be
+// `--paginate --jq '.[]'` producing NDJSON, parsed line-by-line.)
 export function fetchReviewThreadComments(
   number: number,
   repo: string,
 ): ReviewThreadComment[] {
   const [owner, name] = repo.split("/");
-  const json = gh(["api", `repos/${owner}/${name}/pulls/${number}/comments?per_page=100`, "--jq", "."]);
-  const comments = JSON.parse(json) as Array<{
-    id: number;
-    in_reply_to_id?: number;
-    user: { login: string };
-    body: string;
-    created_at: string;
-    path: string;
-  }>;
+  const json = gh([
+    "api",
+    `repos/${owner}/${name}/pulls/${number}/comments?per_page=100`,
+    "--paginate",
+    "--slurp",
+  ]);
+  const pages = JSON.parse(json) as RawReviewThreadComment[][];
+  const comments = pages.flat();
   return comments.map((c) => ({
     id: c.id,
     inReplyToId: c.in_reply_to_id ?? null,

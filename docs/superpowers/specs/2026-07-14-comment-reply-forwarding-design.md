@@ -75,6 +75,8 @@ a new fetcher in `src/github.ts` (sibling of `fetchCommentsByUsers`,
 **State:** `data/reply-watch.json` — `Array<{ number, repo, lastReplyNotifiedAt }>`.
 Records whose PR is absent from the current discovery union are dropped (the
 searches only return open PRs; a merged/closed PR's cursor is no longer needed).
+New PRs are seeded at first discovery — no historical backfill; only replies
+after discovery dispatch.
 
 **Dispatch:** all new replies for a PR batch into one message:
 

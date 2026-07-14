@@ -48,15 +48,19 @@ function fetchHeadBranch(prNumber: number, nameWithOwner: string): string {
   }
 }
 
+// Returns whether the event actually reached ateam: false when PR identity
+// can't be parsed or the exec fails (callers must not advance cursors/stamps
+// on false — the event was lost, not delivered); true on a dry-run no-op
+// (deliberate skip, not a failure) and on exec success.
 export function routeToAgent(
   config: ShepherdConfig,
   message: string,
   opts?: { reviewRequest?: boolean; transition?: string },
-): void {
+): boolean {
   const identity = parsePRIdentity(message);
   if (!identity) {
     console.log("[pr-shepherd] couldn't parse PR identity from message; skipping ateam route-pr-event");
-    return;
+    return false;
   }
 
   const { owner, repo, prNumber, prUrl } = identity;
@@ -67,7 +71,7 @@ export function routeToAgent(
 
   if (config.dryRun) {
     console.log(`[pr-shepherd] [dry-run] would route PR #${prNumber} (${nameWithOwner}) to ateam route-pr-event`);
-    return;
+    return true;
   }
 
   const tmpFile = join(tmpdir(), `pr-shepherd-body-${Date.now()}-${prNumber}.txt`);
@@ -94,10 +98,12 @@ export function routeToAgent(
       console.log(`[pr-shepherd][debug] route-pr-event stdout: ${output.trim()}`);
     }
     console.log(`[pr-shepherd][debug] route-pr-event exited successfully`);
+    return true;
   } catch (err) {
     const error = err as Error & { stdout?: string; stderr?: string };
     const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim();
     console.log(`[pr-shepherd] ateam route-pr-event failed for PR #${prNumber}: ${error.message}${captured ? `\n${captured}` : ""}`);
+    return false;
   } finally {
     try { unlinkSync(tmpFile); } catch { /* ignore */ }
   }

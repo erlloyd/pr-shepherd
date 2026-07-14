@@ -168,6 +168,7 @@ describe("pollReviewInbox dry-run", () => {
   beforeEach(() => {
     mkdirSync(TMP_POLL, { recursive: true });
     vi.clearAllMocks();
+    mockedRoute.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -227,6 +228,7 @@ describe("re-review on re-request", () => {
   beforeEach(() => {
     mkdirSync(TMP_RR, { recursive: true });
     vi.clearAllMocks();
+    mockedRoute.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -255,6 +257,26 @@ describe("re-review on re-request", () => {
     const persisted = readInbox(TMP_RR);
     expect(persisted[0].status).toBe("re_review_dispatched");
     expect(persisted[0].reReviewDispatchedAt).toBeTruthy();
+  });
+
+  it("leaves reReviewDispatchedAt null when routeToAgent fails, so the next poll retries", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({ status: "review_submitted", completedAt: "2026-07-01T00:00:00Z" }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(
+        JSON.stringify({ reviewRequests: [{ login: "testuser" }] }) as unknown as ReturnType<typeof execFileSync>,
+      ) // isUserReviewRequested
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
+    mockedRoute.mockReturnValueOnce(false);
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const persisted = readInbox(TMP_RR);
+    expect(persisted[0].status).toBe("re_review_dispatched");
+    expect(persisted[0].reReviewDispatchedAt).toBeNull();
   });
 
   it("does not re-dispatch while a re-review is pending", async () => {
@@ -293,7 +315,12 @@ describe("re-review on re-request", () => {
         JSON.stringify({
           reviews: [
             { author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-10T00:00:00Z" },
-            { author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-14T12:00:00Z" },
+            {
+              author: { login: "testuser" },
+              state: "COMMENTED",
+              submittedAt: "2026-07-14T12:00:00Z",
+              body: "Re-review: all findings addressed",
+            },
           ],
         }) as unknown as ReturnType<typeof execFileSync>, // latestUserReviewAt — newer
       );
@@ -444,5 +471,54 @@ describe("latestUserReviewAt", () => {
       throw new Error("gh failed");
     });
     expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBeNull();
+  });
+
+  it("ignores a body-less COMMENTED review even when it is the newest (implicit thread-reply review)", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({
+        reviews: [
+          { author: { login: "testuser" }, state: "APPROVED", submittedAt: "2026-07-10T00:00:00Z" },
+          { author: { login: "testuser" }, state: "COMMENTED", submittedAt: "2026-07-15T00:00:00Z" },
+        ],
+      }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-10T00:00:00Z");
+  });
+
+  it("counts a COMMENTED review that has a body (a legitimate re-review)", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({
+        reviews: [
+          { author: { login: "testuser" }, state: "APPROVED", submittedAt: "2026-07-10T00:00:00Z" },
+          {
+            author: { login: "testuser" },
+            state: "COMMENTED",
+            submittedAt: "2026-07-15T00:00:00Z",
+            body: "Re-review: all findings addressed",
+          },
+        ],
+      }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-15T00:00:00Z");
+  });
+
+  it("counts body-less APPROVED and CHANGES_REQUESTED reviews (only COMMENTED needs a body)", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({
+        reviews: [
+          { author: { login: "testuser" }, state: "APPROVED", submittedAt: "2026-07-10T00:00:00Z" },
+        ],
+      }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-10T00:00:00Z");
+
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({
+        reviews: [
+          { author: { login: "testuser" }, state: "CHANGES_REQUESTED", submittedAt: "2026-07-11T00:00:00Z" },
+        ],
+      }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-11T00:00:00Z");
   });
 });

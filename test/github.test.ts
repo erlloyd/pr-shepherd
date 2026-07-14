@@ -258,10 +258,14 @@ describe("github", () => {
 
   describe("fetchReviewThreadComments", () => {
     it("parses id, in_reply_to_id, path, author, body, createdAt", () => {
+      // --paginate --slurp wraps each page's JSON array in an outer array —
+      // a single page here.
       mockedExec.mockReturnValueOnce(
         JSON.stringify([
-          { id: 100, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T10:00:00Z", path: "src/a.ts" },
-          { id: 101, in_reply_to_id: 100, user: { login: "alice" }, body: "reply", created_at: "2026-07-14T11:00:00Z", path: "src/a.ts" },
+          [
+            { id: 100, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T10:00:00Z", path: "src/a.ts" },
+            { id: 101, in_reply_to_id: 100, user: { login: "alice" }, body: "reply", created_at: "2026-07-14T11:00:00Z", path: "src/a.ts" },
+          ],
         ]) as unknown as ReturnType<typeof execFileSync>,
       );
       const comments = fetchReviewThreadComments(42, "acme/widgets");
@@ -269,6 +273,23 @@ describe("github", () => {
         { id: 100, inReplyToId: null, author: "shepherd", body: "finding", createdAt: "2026-07-14T10:00:00Z", path: "src/a.ts" },
         { id: 101, inReplyToId: 100, author: "alice", body: "reply", createdAt: "2026-07-14T11:00:00Z", path: "src/a.ts" },
       ]);
+    });
+
+    it("flattens multiple pages returned by --paginate --slurp", () => {
+      mockedExec.mockReturnValueOnce(
+        JSON.stringify([
+          [
+            { id: 100, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T10:00:00Z", path: "src/a.ts" },
+          ],
+          [
+            { id: 101, in_reply_to_id: 100, user: { login: "alice" }, body: "reply", created_at: "2026-07-14T11:00:00Z", path: "src/a.ts" },
+          ],
+        ]) as unknown as ReturnType<typeof execFileSync>,
+      );
+      const comments = fetchReviewThreadComments(42, "acme/widgets");
+      expect(comments).toHaveLength(2);
+      expect(comments.map((c) => c.id)).toEqual([100, 101]);
+      expect(comments[1].inReplyToId).toBe(100);
     });
   });
 });

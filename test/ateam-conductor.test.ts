@@ -212,7 +212,7 @@ describe("ateam-conductor", () => {
   });
 
   describe("ateam exec error", () => {
-    it("logs but does not throw on ateam exec failure", () => {
+    it("logs but does not throw on ateam exec failure, and returns false", () => {
       // First call (gh) succeeds; second call (ateam) throws
       mockedExec
         .mockReturnValueOnce("feature-x\n" as unknown as ReturnType<typeof execFileSync>)
@@ -221,8 +221,29 @@ describe("ateam-conductor", () => {
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       const msg = "[PR Shepherd] PR #3 (foo/bar) — CI Failed";
 
-      expect(() => routeToAgent(makeConfig(), msg)).not.toThrow();
+      let result: boolean | undefined;
+      expect(() => { result = routeToAgent(makeConfig(), msg); }).not.toThrow();
+      expect(result).toBe(false);
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("ateam route-pr-event failed"));
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe("routeToAgent return value", () => {
+    it("returns true on exec success", () => {
+      const msg = "[PR Shepherd] PR #4 (foo/bar) — CI Failed";
+      expect(routeToAgent(makeConfig(), msg)).toBe(true);
+    });
+
+    it("returns false when PR identity cannot be parsed", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      expect(routeToAgent(makeConfig(), "no PR reference here")).toBe(false);
+      consoleSpy.mockRestore();
+    });
+
+    it("returns true on dry-run no-op", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      expect(routeToAgent(makeConfig({ dryRun: true }), "[PR Shepherd] PR #5 (foo/bar) — CI Failed")).toBe(true);
       consoleSpy.mockRestore();
     });
   });

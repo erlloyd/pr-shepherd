@@ -99,10 +99,16 @@ export function latestUserReviewAt(number: number, repo: string, githubUser: str
       { encoding: "utf-8", timeout: 15_000 },
     ).trim();
     const { reviews } = JSON.parse(json) as {
-      reviews: Array<{ author: { login: string }; submittedAt?: string }>;
+      reviews: Array<{ author: { login: string }; submittedAt?: string; state?: string; body?: string }>;
     };
+    // Replying in-thread (`-F in_reply_to=...`) creates an implicit COMMENTED
+    // review with an empty body. Counting it would falsely complete a pending
+    // re-review on the same PR the moment a comment-reply response posts. A
+    // legitimate re-review posts COMMENT WITH a body ("Re-review: ..."), so
+    // only body-less COMMENTED reviews are excluded here.
     const ours = reviews
       .filter((r) => r.author.login.toLowerCase() === githubUser.toLowerCase())
+      .filter((r) => r.state !== "COMMENTED" || (r.body ?? "").trim() !== "")
       .map((r) => r.submittedAt)
       .filter((t): t is string => Boolean(t))
       .sort();
@@ -382,8 +388,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
           const msg = formatReReviewMessage(assignment);
           if (config.dryRun) {
             log(`[dry-run] would dispatch re-review of PR #${assignment.number} (${assignment.repo}) to ateam`);
-          } else {
-            routeToAgent(config, msg, { transition: "re_review" });
+          } else if (routeToAgent(config, msg, { transition: "re_review" })) {
             assignment.reReviewDispatchedAt = new Date().toISOString();
             updated = true;
             log(`Re-review dispatched: PR #${assignment.number} (${assignment.repo})`);
@@ -397,6 +402,8 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
               to: "OPENED",
               details: { type: "re_review_inbox", title: assignment.title, url: assignment.url },
             });
+          } else {
+            log(`Re-review dispatch failed for PR #${assignment.number} (${assignment.repo}) — will retry next poll`);
           }
         }
       } catch (err) {

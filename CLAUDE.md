@@ -30,7 +30,7 @@ A single long-running Node.js process with two polling loops on a shared interva
 
 3. **Review follow-up** — tracks PRs where we left `CHANGES_REQUESTED` reviews. When the author pushes new commits, notifies the agent for a scoped re-review (only check previously raised issues, no new findings). Stops on approval.
 
-4. **Reply watch** — scans inline review-comment threads on PRs we reviewed (`gh search prs --reviewed-by`) and our watched authored PRs. When someone replies in a thread our identity participated in (newer than our last comment in that thread), forwards the reply to the owning initiative via `--transition comment_reply`: an open initiative gets mail; a closed review initiative is reopened and its session relaunched in comment-reply mode to respond in-thread; no initiative → dropped. Cursor per PR in `data/reply-watch.json`.
+4. **Reply watch** — scans inline review-comment threads on PRs we reviewed (`gh search prs --reviewed-by`) and our watched authored PRs. When someone replies in a thread our identity participated in (newer than our last comment in that thread), forwards the reply to the owning initiative via `--transition comment_reply`: an open initiative gets mail; a closed review initiative is reopened and its session relaunched in comment-reply mode to respond in-thread; no initiative → dropped. Cursor per PR in `data/reply-watch.json`. New PRs are seeded at first discovery — no historical backfill; only replies after discovery dispatch.
 
 5. **Reviewer nudge** — when a worker pushes fixes on an authored PR that had `CHANGES_REQUESTED` reviews, posts a GitHub @mention to the reviewer. Escalates to the agent after configurable hours (business days only) if no response.
 
