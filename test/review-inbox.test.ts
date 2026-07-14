@@ -5,6 +5,7 @@ import {
   formatReviewAssignmentMessage,
   pollReviewInbox,
   latestUserReviewAt,
+  isUserReviewRequested,
 } from "../src/review-inbox.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -238,6 +239,9 @@ describe("re-review on re-request", () => {
     ]);
     mockedExec
       .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(
+        JSON.stringify({ reviewRequests: [{ login: "testuser" }] }) as unknown as ReturnType<typeof execFileSync>,
+      ) // isUserReviewRequested
       .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
 
     await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
@@ -309,6 +313,9 @@ describe("re-review on re-request", () => {
           reviews: [{ author: { login: "testuser" }, state: "COMMENTED" }],
         }) as unknown as ReturnType<typeof execFileSync>, // hasUserReviewed → true
       )
+      .mockReturnValueOnce(
+        JSON.stringify({ reviewRequests: [{ login: "testuser" }] }) as unknown as ReturnType<typeof execFileSync>,
+      ) // isUserReviewRequested
       .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>); // getPRState
 
     await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
@@ -341,6 +348,76 @@ describe("re-review on re-request", () => {
     expect(mockedRoute).toHaveBeenCalledTimes(1);
     expect(mockedRoute.mock.calls[0][1]).toContain("no longer needed");
     expect(readInbox(TMP_RR)[0].status).toBe("merged_before_review");
+  });
+
+  it("does not flip when the search lists the PR but we are not currently requested (team request / index lag)", async () => {
+    writeInbox(TMP_RR, [
+      makeAssignment({ status: "review_submitted", completedAt: "2026-07-01T00:00:00Z" }),
+    ]);
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(
+        JSON.stringify({ reviewRequests: [] }) as unknown as ReturnType<typeof execFileSync>,
+      ); // isUserReviewRequested → false
+    // Note: status stays "review_submitted", so the tracked-assignment loop
+    // skips this record before ever calling getPRState.
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    const persisted = readInbox(TMP_RR);
+    expect(persisted[0]?.status ?? "review_submitted").toBe("review_submitted");
+  });
+
+  it("does not create a re-review record for a reviewed PR when not currently requested", async () => {
+    mockedExec
+      .mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [{ author: { login: "testuser" }, state: "COMMENTED" }],
+        }) as unknown as ReturnType<typeof execFileSync>, // hasUserReviewed → true
+      )
+      .mockReturnValueOnce(
+        JSON.stringify({ reviewRequests: [{ login: "someoneelse" }] }) as unknown as ReturnType<
+          typeof execFileSync
+        >,
+      ); // isUserReviewRequested → false
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_RR, dryRun: false }));
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    const persisted = readInbox(TMP_RR);
+    expect(persisted.find((a) => a.number === 42 && a.repo === "acme/widgets")).toBeUndefined();
+  });
+});
+
+describe("isUserReviewRequested", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns true on a case-insensitive login match", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({ reviewRequests: [{ login: "TestUser" }] }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(isUserReviewRequested(42, "acme/widgets", "testuser")).toBe(true);
+  });
+
+  it("returns false for team-only entries with no login", () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({ reviewRequests: [{}] }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(isUserReviewRequested(42, "acme/widgets", "testuser")).toBe(false);
+
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify({ reviewRequests: [{ name: "team" }] }) as unknown as ReturnType<typeof execFileSync>,
+    );
+    expect(isUserReviewRequested(42, "acme/widgets", "testuser")).toBe(false);
+  });
+
+  it("returns false when gh throws", () => {
+    mockedExec.mockImplementationOnce(() => {
+      throw new Error("gh failed");
+    });
+    expect(isUserReviewRequested(42, "acme/widgets", "testuser")).toBe(false);
   });
 });
 

@@ -71,6 +71,26 @@ export function hasUserReviewed(number: number, repo: string, githubUser: string
   }
 }
 
+export function isUserReviewRequested(number: number, repo: string, githubUser: string): boolean {
+  try {
+    const json = execFileSync(
+      "gh",
+      ["pr", "view", String(number), "-R", repo, "--json", "reviewRequests"],
+      { encoding: "utf-8", timeout: 15_000 },
+    ).trim();
+    const { reviewRequests } = JSON.parse(json) as {
+      reviewRequests: Array<{ login?: string }>;
+    };
+    return reviewRequests.some(
+      (r) => (r.login ?? "").toLowerCase() === githubUser.toLowerCase(),
+    );
+  } catch {
+    // Conservative: an unconfirmed re-request is not dispatched; the next
+    // poll retries. Prevents spurious re-reviews on gh failures.
+    return false;
+  }
+}
+
 export function latestUserReviewAt(number: number, repo: string, githubUser: string): string | null {
   try {
     const json = execFileSync(
@@ -162,8 +182,14 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         // A PR we already reviewed reappearing in the review-requested search
         // means the author re-requested review — GitHub drops a reviewer from
         // requested_reviewers when their review posts and re-adds them on
-        // re-request.
-        if (existing.status === "review_submitted") {
+        // re-request. The search index is eventually consistent and team
+        // review requests keep a PR in the search indefinitely, so confirm
+        // via the real-time API that we are CURRENTLY a requested reviewer
+        // before flipping.
+        if (
+          existing.status === "review_submitted" &&
+          isUserReviewRequested(pr.number, pr.repository.nameWithOwner, username)
+        ) {
           existing.status = "re_review_dispatched";
           existing.reReviewDispatchedAt = null;
           existing.completedAt = null;
@@ -175,22 +201,26 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
 
       if (hasUserReviewed(pr.number, pr.repository.nameWithOwner, username)) {
         // Already reviewed but no inbox record (pruned, or reviewed before the
-        // daemon existed) — same re-request signal.
-        const assignment: ReviewAssignment = {
-          number: pr.number,
-          repo: pr.repository.nameWithOwner,
-          title: pr.title,
-          url: pr.url,
-          detectedAt: new Date().toISOString(),
-          notifiedAt: null,
-          completedAt: null,
-          reReviewDispatchedAt: null,
-          status: "re_review_dispatched",
-        };
-        inbox.push(assignment);
-        byKey.set(key, assignment);
-        updated = true;
-        log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested (no prior inbox record).`);
+        // daemon existed) — same re-request signal, gated the same way.
+        if (isUserReviewRequested(pr.number, pr.repository.nameWithOwner, username)) {
+          const assignment: ReviewAssignment = {
+            number: pr.number,
+            repo: pr.repository.nameWithOwner,
+            title: pr.title,
+            url: pr.url,
+            detectedAt: new Date().toISOString(),
+            notifiedAt: null,
+            completedAt: null,
+            reReviewDispatchedAt: null,
+            status: "re_review_dispatched",
+          };
+          inbox.push(assignment);
+          byKey.set(key, assignment);
+          updated = true;
+          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested (no prior inbox record).`);
+        } else {
+          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — already reviewed.`);
+        }
         continue;
       }
 
@@ -388,8 +418,9 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
 
     const pending = active.filter((a) => a.status === "pending_bot_review").length;
     const dispatched = active.filter((a) => a.status === "dispatched").length;
-    if (pending > 0 || dispatched > 0) {
-      log(`Active: ${dispatched} dispatched, ${pending} waiting for bot review.`);
+    const reReviews = active.filter((a) => a.status === "re_review_dispatched").length;
+    if (pending > 0 || dispatched > 0 || reReviews > 0) {
+      log(`Active: ${dispatched} dispatched, ${reReviews} re-reviews pending, ${pending} waiting for bot review.`);
     }
   } catch (err) {
     log(`Error polling review inbox: ${(err as Error).message}`);

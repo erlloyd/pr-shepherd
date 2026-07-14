@@ -20,7 +20,7 @@ Two watch loops run on a configurable interval (default: 3 minutes):
    - **PR merges** → cleans up state cache, routes a close-out instruction
    - **PR closes** → cleans up state cache silently (no event routed)
 
-2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts, old PRs (configurable `maxAgeDays`), and PRs you've already reviewed. Routes new assignments to `ateam route-pr-event`.
+2. **Review inbox** — polls GitHub for PRs where you're a requested reviewer. Filters out drafts and old PRs (configurable `maxAgeDays`); PRs you've already reviewed are skipped unless review is re-requested, in which case a focused re-review is dispatched. Routes new assignments to `ateam route-pr-event`.
 
 **Communication:** All events are routed via `ateam route-pr-event` with structured fields (repo, PR number, head branch, transition type). The daemon itself consumes zero AI tokens — it's pure Node.js polling.
 
