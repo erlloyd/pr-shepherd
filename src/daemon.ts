@@ -539,12 +539,21 @@ export async function startDaemon(config: ShepherdConfig): Promise<void> {
     log.info(`Reply watch enabled for @${config.reviewInbox.githubUser ?? config.github.authorUsername}`);
   }
 
+  const safe = async <T>(name: string, fallback: T, fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      log.error(`${name} poll failed: ${(err as Error).message}`);
+      return fallback;
+    }
+  };
+
   async function runCycle(): Promise<void> {
-    const authored = await pollAll(config);
-    const inbox = await pollReviewInbox(config);
-    const followups = await pollReviewFollowUps(config);
-    const nudges = await pollReviewerNudges(config);
-    const replyTargets = await pollReplyWatch(config);
+    const authored = await safe("authored", 0, () => pollAll(config));
+    const inbox = await safe("inbox", null, () => pollReviewInbox(config));
+    const followups = await safe("followups", null, () => pollReviewFollowUps(config));
+    const nudges = await safe("nudges", null, () => pollReviewerNudges(config));
+    const replyTargets = await safe("reply-watch", null, () => pollReplyWatch(config));
 
     const parts = [`${authored} authored`];
     if (inbox !== null) parts.push(`${inbox.active} inbox${inbox.reReviews > 0 ? ` (${inbox.reReviews} re-review pending)` : ""}`);
