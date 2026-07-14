@@ -539,16 +539,19 @@ export async function startDaemon(config: ShepherdConfig): Promise<void> {
     log.info(`Reply watch enabled for @${config.reviewInbox.githubUser ?? config.github.authorUsername}`);
   }
 
-  const safe = async <T>(name: string, fallback: T, fn: () => Promise<T>): Promise<T> => {
-    try {
-      return await fn();
-    } catch (err) {
-      log.error(`${name} poll failed: ${(err as Error).message}`);
-      return fallback;
-    }
-  };
-
   async function runCycle(): Promise<void> {
+    let failures = 0;
+
+    const safe = async <T>(name: string, fallback: T, fn: () => Promise<T>): Promise<T> => {
+      try {
+        return await fn();
+      } catch (err) {
+        log.error(`${name} poll failed: ${(err as Error).message}`);
+        failures++;
+        return fallback;
+      }
+    };
+
     const authored = await safe("authored", 0, () => pollAll(config));
     const inbox = await safe("inbox", null, () => pollReviewInbox(config));
     const followups = await safe("followups", null, () => pollReviewFollowUps(config));
@@ -560,7 +563,12 @@ export async function startDaemon(config: ShepherdConfig): Promise<void> {
     if (followups !== null) parts.push(`${followups} followups`);
     if (nudges !== null) parts.push(`${nudges} nudges`);
     if (replyTargets !== null) parts.push(`${replyTargets} reply-watch`);
-    log.info(`poll ok — ${parts.join(", ")}`);
+
+    if (failures === 0) {
+      log.info(`poll ok — ${parts.join(", ")}`);
+    } else {
+      log.warn(`poll degraded (${failures} poller(s) failed) — ${parts.join(", ")}`);
+    }
   }
 
   await runCycle();

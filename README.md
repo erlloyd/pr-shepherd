@@ -96,9 +96,11 @@ make inbox          # Show pending review assignments
 
 Three layers, in priority order:
 
-1. **CLI flags** — `--dry-run`, `--interval`, `-c <path>`, `--verbose`
+1. **CLI flags** — `--dry-run`, `--interval`, `-c <path>`
 2. **Environment variables** — `PR_SHEPHERD_*` (see `.env.example`)
 3. **Config file** — `shepherd.config.json` in the working directory
+
+(Note: `--verbose` is independent of config precedence — enable debug-level logging with `--verbose` or `PR_SHEPHERD_VERBOSE=true`, independent of config file settings.)
 
 ### Required Configuration
 

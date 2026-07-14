@@ -93,12 +93,14 @@ Every log line is formatted `HH:MM:SS LEVEL [subsystem] message` (e.g.
 always print; `DEBUG` is gated behind verbose mode.
 
 Enable verbose (debug-level) logging with `--verbose` or
-`PR_SHEPHERD_VERBOSE=true`. Each poll cycle emits a `poll ok — ...` heartbeat
-from `runCycle` in `src/daemon.ts` summarizing every subsystem's count — a
-silent console means the daemon is down. Each of the five pollers is wrapped
-in its own try/catch (`safe()` in `startDaemon`), so one poller throwing
-logs `<name> poll failed: <message>` and falls back to a placeholder count
-rather than skipping the heartbeat or crashing the process.
+`PR_SHEPHERD_VERBOSE=true`. Each poll cycle emits a heartbeat from `runCycle` 
+in `src/daemon.ts` summarizing every subsystem's count — a silent console 
+means the daemon is down. Each of the five pollers is wrapped in its own 
+try/catch (`safe()` in `runCycle`), so one poller throwing logs 
+`<name> poll failed: <message>` and is omitted from that cycle's heartbeat 
+(or shows 0 for authored). If all pollers succeed, the heartbeat logs 
+`poll ok — <counts>`; if any fail, it logs `poll degraded (<N> poller(s) failed) — <counts>` 
+at `warn` level instead of `info`.
 
 ## Tests
 
