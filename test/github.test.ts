@@ -1,10 +1,18 @@
-import { describe, it, expect } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus } from "../src/github.js";
+import { describe, it, expect, vi } from "vitest";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments } from "../src/github.js";
 import type { IssueComment } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+
+// Mock node:child_process so execFileSync never shells out
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(),
+}));
+
+const mockedExec = vi.mocked(execFileSync);
 
 const FIXTURES = join(import.meta.dirname, "fixtures");
 
@@ -245,6 +253,22 @@ describe("github", () => {
     it("returns false when the PR is not in the merge queue", () => {
       const raw = readFileSync(join(FIXTURES, "merge-queue-not-in-queue.json"), "utf-8");
       expect(parseMergeQueueStatus(raw)).toBe(false);
+    });
+  });
+
+  describe("fetchReviewThreadComments", () => {
+    it("parses id, in_reply_to_id, path, author, body, createdAt", () => {
+      mockedExec.mockReturnValueOnce(
+        JSON.stringify([
+          { id: 100, user: { login: "shepherd" }, body: "finding", created_at: "2026-07-14T10:00:00Z", path: "src/a.ts" },
+          { id: 101, in_reply_to_id: 100, user: { login: "alice" }, body: "reply", created_at: "2026-07-14T11:00:00Z", path: "src/a.ts" },
+        ]) as unknown as ReturnType<typeof execFileSync>,
+      );
+      const comments = fetchReviewThreadComments(42, "acme/widgets");
+      expect(comments).toEqual([
+        { id: 100, inReplyToId: null, author: "shepherd", body: "finding", createdAt: "2026-07-14T10:00:00Z", path: "src/a.ts" },
+        { id: 101, inReplyToId: 100, author: "alice", body: "reply", createdAt: "2026-07-14T11:00:00Z", path: "src/a.ts" },
+      ]);
     });
   });
 });

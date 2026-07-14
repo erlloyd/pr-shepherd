@@ -173,6 +173,42 @@ export function selectNewComments(
   return comments.filter((c) => c.createdAt > since);
 }
 
+export type ReviewThreadComment = {
+  id: number;
+  inReplyToId: number | null;
+  author: string;
+  body: string;
+  createdAt: string;
+  path: string;
+};
+
+// All inline review-comment thread comments for a PR. Replies carry
+// in_reply_to_id pointing at the thread ROOT comment (GitHub flattens
+// nesting), so thread grouping is `inReplyToId ?? id`.
+export function fetchReviewThreadComments(
+  number: number,
+  repo: string,
+): ReviewThreadComment[] {
+  const [owner, name] = repo.split("/");
+  const json = gh(["api", `repos/${owner}/${name}/pulls/${number}/comments`, "--jq", "."]);
+  const comments = JSON.parse(json) as Array<{
+    id: number;
+    in_reply_to_id?: number;
+    user: { login: string };
+    body: string;
+    created_at: string;
+    path: string;
+  }>;
+  return comments.map((c) => ({
+    id: c.id,
+    inReplyToId: c.in_reply_to_id ?? null,
+    author: c.user.login,
+    body: c.body,
+    createdAt: c.created_at,
+    path: c.path,
+  }));
+}
+
 export function fetchCommits(
   number: number,
   repo: string,
