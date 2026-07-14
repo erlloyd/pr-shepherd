@@ -25,6 +25,7 @@ A single long-running Node.js process with two polling loops on a shared interva
    - **Dispatch** → notifies the agent to assign a worker for review
    - **Merged before review** → if PR merges before our review is posted, notifies the agent to free the worker
    - **Review submitted** → if our review is posted, notifies the agent to free the worker
+   - **Review re-requested** → a PR we already reviewed reappearing in the review-requested search (GitHub re-adds a reviewer on re-request) is dispatched as a focused re-review (`--transition re_review`): the agent verifies previously raised findings were addressed, no new findings. Completion is detected by a review of ours newer than the dispatch. Repeatable per PR.
    - Filters by age (`maxAgeDays`), draft status, repos, and whether the user already reviewed
 
 3. **Review follow-up** — tracks PRs where we left `CHANGES_REQUESTED` reviews. When the author pushes new commits, notifies the agent for a scoped re-review (only check previously raised issues, no new findings). Stops on approval.
@@ -85,7 +86,7 @@ make inbox          # Pending review assignments
 ## Tests
 
 ```bash
-npm test            # 150 tests across 8 files
+npm test            # 163 tests across 8 files
 npm run typecheck   # Clean TypeScript check
 ```
 
