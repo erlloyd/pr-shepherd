@@ -138,6 +138,24 @@ describe("ateam-conductor", () => {
       const [, args] = mockedExec.mock.calls[1] as [string, string[]];
       expect(args[args.indexOf("--transition") + 1]).toBe("other");
     });
+
+    it("passes an explicit transition when opts.transition is set", () => {
+      const msg = "[PR Shepherd] Re-review requested: PR #10 (org/repo)";
+
+      routeToAgent(makeConfig(), msg, { transition: "re_review" });
+
+      const [, args] = mockedExec.mock.calls[1] as [string, string[]];
+      expect(args[args.indexOf("--transition") + 1]).toBe("re_review");
+    });
+
+    it("explicit transition wins over reviewRequest boolean", () => {
+      const msg = "[PR Shepherd] Re-review requested: PR #10 (org/repo)";
+
+      routeToAgent(makeConfig(), msg, { reviewRequest: true, transition: "re_review" });
+
+      const [, args] = mockedExec.mock.calls[1] as [string, string[]];
+      expect(args[args.indexOf("--transition") + 1]).toBe("re_review");
+    });
   });
 
   describe("ateam binary resolution", () => {

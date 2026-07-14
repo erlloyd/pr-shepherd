@@ -51,7 +51,7 @@ function fetchHeadBranch(prNumber: number, nameWithOwner: string): string {
 export function routeToAgent(
   config: ShepherdConfig,
   message: string,
-  opts?: { reviewRequest?: boolean },
+  opts?: { reviewRequest?: boolean; transition?: string },
 ): void {
   const identity = parsePRIdentity(message);
   if (!identity) {
@@ -61,7 +61,7 @@ export function routeToAgent(
 
   const { owner, repo, prNumber, prUrl } = identity;
   const nameWithOwner = `${owner}/${repo}`;
-  const transition = opts?.reviewRequest ? "review_requested" : "other";
+  const transition = opts?.transition ?? (opts?.reviewRequest ? "review_requested" : "other");
   const headBranch = fetchHeadBranch(prNumber, nameWithOwner);
   const ateam = process.env.PR_SHEPHERD_ATEAM_PATH ?? "ateam";
 
