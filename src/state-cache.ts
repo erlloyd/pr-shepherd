@@ -1,6 +1,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createLogger } from "./log.js";
 import type { WatchedPR, PRState } from "./types.js";
+
+const log = createLogger("state-cache");
 
 function cachePath(dataDir: string): string {
   return join(dataDir, "pr-state-cache.json");
@@ -18,7 +21,7 @@ export function readCache(dataDir: string): WatchedPR[] {
   try {
     return JSON.parse(raw) as WatchedPR[];
   } catch {
-    console.error(`[pr-shepherd] Corrupt state cache at ${path}, treating as empty`);
+    log.warn(`Corrupt state cache at ${path}, treating as empty`);
     return [];
   }
 }

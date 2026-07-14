@@ -6,8 +6,11 @@ import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
 import { readCache } from "./state-cache.js";
 import { isTerminal } from "./state-machine.js";
+import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReplyWatchRecord } from "./types.js";
 import type { ReviewThreadComment } from "./github.js";
+
+const log = createLogger("reply-watch");
 
 export type NewReply = {
   rootId: number;
@@ -70,17 +73,13 @@ function replyWatchPath(dataDir: string): string {
   return join(dataDir, "reply-watch.json");
 }
 
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] [reply-watch] ${msg}`);
-}
-
 export function readReplyWatch(dataDir: string): ReplyWatchRecord[] {
   const path = replyWatchPath(dataDir);
   if (!existsSync(path)) return [];
   try {
     return JSON.parse(readFileSync(path, "utf-8")) as ReplyWatchRecord[];
   } catch {
-    console.error(`[pr-shepherd] Corrupt reply-watch state at ${path}, treating as empty`);
+    log.warn(`Corrupt reply-watch state at ${path}, treating as empty`);
     return [];
   }
 }
@@ -139,10 +138,10 @@ export function formatReplyMessage(target: ReplyTarget, replies: NewReply[]): st
   ].join("\n");
 }
 
-export async function pollReplyWatch(config: ShepherdConfig): Promise<void> {
-  if (!config.replyWatch.enabled) return;
+export async function pollReplyWatch(config: ShepherdConfig): Promise<number | null> {
+  if (!config.replyWatch.enabled) return null;
   const githubUser = config.reviewInbox.githubUser ?? config.github.authorUsername;
-  if (!githubUser) return;
+  if (!githubUser) return null;
 
   try {
     const targets = new Map<string, ReplyTarget>();
@@ -214,7 +213,7 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<void> {
         }
 
         if (config.dryRun) {
-          log(`[dry-run] would forward ${replies.length} repl${replies.length === 1 ? "y" : "ies"} on PR #${target.number} (${target.repo})`);
+          log.info(`[dry-run] would forward ${replies.length} repl${replies.length === 1 ? "y" : "ies"} on PR #${target.number} (${target.repo})`);
           continue;
         }
 
@@ -222,7 +221,7 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<void> {
         if (routeToAgent(config, msg, { transition: "comment_reply" })) {
           record.lastReplyNotifiedAt = replies[replies.length - 1].createdAt;
           updated = true;
-          log(`Forwarded ${replies.length} repl${replies.length === 1 ? "y" : "ies"} on PR #${target.number} (${target.repo})`);
+          log.info(`Forwarded ${replies.length} repl${replies.length === 1 ? "y" : "ies"} on PR #${target.number} (${target.repo})`);
 
           appendEvent(config.dataDir, {
             ts: new Date().toISOString(),
@@ -234,17 +233,20 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<void> {
             details: { type: "reply_watch", rootIds: replies.map((r) => r.rootId), authors: replies.map((r) => r.author) },
           });
         } else {
-          log(`Dispatch failed for PR #${target.number} (${target.repo}) — will retry next poll`);
+          log.info(`Dispatch failed for PR #${target.number} (${target.repo}) — will retry next poll`);
         }
       } catch (err) {
-        log(`Error scanning PR #${target.number} (${target.repo}): ${(err as Error).message}`);
+        log.error(`Error scanning PR #${target.number} (${target.repo}): ${(err as Error).message}`);
       }
     }
 
     if (!config.dryRun && (updated || next.length !== state.length)) {
       writeReplyWatch(config.dataDir, next);
     }
+
+    return targets.size;
   } catch (err) {
-    log(`Error polling reply watch: ${(err as Error).message}`);
+    log.error(`Error polling reply watch: ${(err as Error).message}`);
+    return null;
   }
 }

@@ -197,7 +197,7 @@ describe("ateam-conductor", () => {
 
   describe("unparseable message", () => {
     it("logs and returns without exec when PR identity cannot be parsed", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const msg = "Hello world — no PR reference here";
 
       routeToAgent(makeConfig(), msg);
@@ -218,7 +218,7 @@ describe("ateam-conductor", () => {
         .mockReturnValueOnce("feature-x\n" as unknown as ReturnType<typeof execFileSync>)
         .mockImplementationOnce(() => { throw new Error("ateam not found"); });
 
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const msg = "[PR Shepherd] PR #3 (foo/bar) — CI Failed";
 
       let result: boolean | undefined;
@@ -236,7 +236,7 @@ describe("ateam-conductor", () => {
     });
 
     it("returns false when PR identity cannot be parsed", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       expect(routeToAgent(makeConfig(), "no PR reference here")).toBe(false);
       consoleSpy.mockRestore();
     });

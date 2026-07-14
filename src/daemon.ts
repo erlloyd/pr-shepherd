@@ -17,6 +17,7 @@ import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-
 import { appendEvent } from "./events.js";
 import { transition, isTerminal } from "./state-machine.js";
 import { sendToAgent } from "./notifications.js";
+import { createLogger } from "./log.js";
 import { pollReviewInbox } from "./review-inbox.js";
 import { pollReviewFollowUps } from "./review-followup.js";
 import { pollReplyWatch } from "./reply-watch.js";
@@ -32,6 +33,8 @@ import {
 } from "./notifications.js";
 import type { ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
 
+const log = createLogger("daemon");
+
 type RawSearchResult = {
   number: number;
   repository: { name: string; nameWithOwner: string };
@@ -43,10 +46,6 @@ type RawSearchResult = {
 
 function now(): string {
   return new Date().toISOString();
-}
-
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
 function emitEvent(
@@ -66,7 +65,7 @@ function emitEvent(
     details,
   };
   appendEvent(config.dataDir, record);
-  log(`PR #${pr.number} (${pr.repo}): ${pr.state} → ${toState} [${event}]`);
+  log.info(`PR #${pr.number} (${pr.repo}): ${pr.state} → ${toState} [${event}]`);
 }
 
 function tryTransition(
@@ -135,16 +134,16 @@ async function handleTransition(
         const approvals = (details.approvals as number) ?? 0;
         const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge);
         if (config.autoMerge) {
-          log(`Enabling auto-merge for PR #${pr.number}`);
+          log.info(`Enabling auto-merge for PR #${pr.number}`);
           if (!config.dryRun) {
             try {
               enableAutoMerge(pr.number, pr.repo, config.mergeStrategy);
             } catch (err) {
-              log(`Failed to enable auto-merge: ${(err as Error).message}`);
+              log.error(`Failed to enable auto-merge: ${(err as Error).message}`);
             }
           }
         } else {
-          log(`PR #${pr.number} approved — flagging for manual merge (auto-merge disabled)`);
+          log.info(`PR #${pr.number} approved — flagging for manual merge (auto-merge disabled)`);
         }
         if (!config.dryRun) await sendToAgent(config, agent, msg);
         break;
@@ -167,7 +166,7 @@ async function handleTransition(
       }
     }
   } catch (err) {
-    log(`Error handling ${toState} for PR #${pr.number}: ${(err as Error).message}`);
+    log.error(`Error handling ${toState} for PR #${pr.number}: ${(err as Error).message}`);
   }
 }
 
@@ -177,7 +176,7 @@ async function handleTransition(
 // consuming the cursor). Mutates + persists pr on a real (non-dry) run.
 async function handleBotComments(config: ShepherdConfig, pr: WatchedPR): Promise<boolean> {
   if (pr.botFeedbackCount >= config.botFeedback.maxAttempts) {
-    log(`PR #${pr.number} — bot feedback limit reached (${config.botFeedback.maxAttempts}), ignoring further bot findings.`);
+    log.debug(`PR #${pr.number} — bot feedback limit reached (${config.botFeedback.maxAttempts}), ignoring further bot findings.`);
     return false;
   }
   const comments = fetchCommentsByUsers(pr.number, pr.repo, config.reviews.botUsers);
@@ -196,7 +195,7 @@ async function handleBotComments(config: ShepherdConfig, pr: WatchedPR): Promise
       "",
       "This bot review has actionable findings (❌) that need to be addressed before the PR can be approved.",
     ].join("\n");
-    log(`Bot feedback from ${comment.author} on PR #${pr.number} (attempt ${pr.botFeedbackCount + 1}/${config.botFeedback.maxAttempts})`);
+    log.info(`Bot feedback from ${comment.author} on PR #${pr.number} (attempt ${pr.botFeedbackCount + 1}/${config.botFeedback.maxAttempts})`);
     if (!config.dryRun) {
       await sendToAgent(config, config.notifications.notifyAgent!, msg);
     }
@@ -233,7 +232,7 @@ async function handleReviewerComments(config: ShepherdConfig, pr: WatchedPR): Pr
       "",
       comment.body,
     ].join("\n");
-    log(`Reviewer comment from @${comment.author} on PR #${pr.number}`);
+    log.info(`Reviewer comment from @${comment.author} on PR #${pr.number}`);
     if (!config.dryRun) {
       await sendToAgent(config, config.notifications.notifyAgent!, msg);
     }
@@ -301,7 +300,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         const uniqueReviewers = [...new Set(changesRequestedBy)];
         for (const reviewer of uniqueReviewers) {
           registerNudge(config.dataDir, pr.number, pr.repo, reviewer, new Date().toISOString());
-          log(`Registered reviewer nudge for @${reviewer} on PR #${pr.number}`);
+          log.info(`Registered reviewer nudge for @${reviewer} on PR #${pr.number}`);
         }
       }
     }
@@ -317,13 +316,13 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
 
     if (pr.state === "CI_PENDING") {
       if (prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
-        log(`PR #${pr.number} is behind base branch while CI is running — updating branch now (CI will restart).`);
+        log.info(`PR #${pr.number} is behind base branch while CI is running — updating branch now (CI will restart).`);
         if (!config.dryRun) {
           try {
             updateBranch(pr.number, pr.repo);
-            log(`Branch updated for PR #${pr.number}.`);
+            log.info(`Branch updated for PR #${pr.number}.`);
           } catch (err) {
-            log(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
+            log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
           }
         }
       } else {
@@ -353,18 +352,18 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
 
       if (prView.mergeStateStatus === "BEHIND") {
         if (prView.mergeable === "MERGEABLE") {
-          log(`PR #${pr.number} is behind base branch — updating branch.`);
+          log.info(`PR #${pr.number} is behind base branch — updating branch.`);
           if (!config.dryRun) {
             try {
               updateBranch(pr.number, pr.repo);
-              log(`Branch updated for PR #${pr.number}.`);
+              log.info(`Branch updated for PR #${pr.number}.`);
             } catch (err) {
-              log(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
+              log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
             }
           }
         } else if (prView.mergeable === "CONFLICTING") {
           const msg = `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Merge conflicts detected. Auto-merge is enabled but the branch cannot be updated automatically. Please resolve conflicts manually.`;
-          log(`PR #${pr.number} has merge conflicts — escalating.`);
+          log.info(`PR #${pr.number} has merge conflicts — escalating.`);
           if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
         }
       }
@@ -376,7 +375,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       ) {
         tryTransition(config, pr, "entered_merge_queue");
         enteredMergeQueueThisPoll = true;
-        log(`PR #${pr.number} entered the merge queue.`);
+        log.info(`PR #${pr.number} entered the merge queue.`);
         const msg = formatMergeQueueEnteredMessage(pr.number, pr.repo);
         if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
       }
@@ -389,7 +388,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       !fetchMergeQueueStatus(pr.number, pr.repo)
     ) {
       tryTransition(config, pr, "left_queue");
-      log(`PR #${pr.number} left the merge queue without merging — escalating.`);
+      log.info(`PR #${pr.number} left the merge queue without merging — escalating.`);
       const msg = formatMergeQueueLeftMessage(pr.number, pr.repo);
       if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
     }
@@ -455,24 +454,24 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
     pr.lastCheckedAt = now();
     upsertCachedPR(config.dataDir, pr);
   } catch (err) {
-    log(`Error polling PR #${pr.number} (${pr.repo}): ${(err as Error).message}`);
+    log.error(`Error polling PR #${pr.number} (${pr.repo}): ${(err as Error).message}`);
   }
 }
 
-export async function pollAll(config: ShepherdConfig): Promise<void> {
+export async function pollAll(config: ShepherdConfig): Promise<number> {
   const username = config.github.authorUsername!;
-  log(`Discovering open PRs by @${username}...`);
+  log.debug(`Discovering open PRs by @${username}...`);
 
   let discovered: RawSearchResult[];
   try {
     discovered = discoverAuthoredPRs(username);
   } catch (err) {
-    log(`Error discovering PRs: ${(err as Error).message}`);
-    return;
+    log.error(`Error discovering PRs: ${(err as Error).message}`);
+    return 0;
   }
 
   const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos);
-  log(`Found ${openPRs.length} open non-draft PR(s).`);
+  log.debug(`Found ${openPRs.length} open non-draft PR(s).`);
 
   for (const raw of openPRs) {
     const cached = getCachedPR(config.dataDir, raw.number, raw.repository.nameWithOwner);
@@ -510,45 +509,52 @@ export async function pollAll(config: ShepherdConfig): Promise<void> {
       const prView = fetchPRView(pr.number, pr.repo);
       const handled = await checkMergedOrClosed(config, pr, prView);
       if (!handled) {
-        log(`PR #${pr.number} (${pr.repo}) missing from open search but still ${prView.state} — leaving cached for next poll.`);
+        log.info(`PR #${pr.number} (${pr.repo}) missing from open search but still ${prView.state} — leaving cached for next poll.`);
       }
     } catch (err) {
-      log(`PR #${pr.number} (${pr.repo}) no longer open and its live state could not be fetched (${(err as Error).message}) — removing from cache.`);
+      log.error(`PR #${pr.number} (${pr.repo}) no longer open and its live state could not be fetched (${(err as Error).message}) — removing from cache.`);
       removeCachedPR(config.dataDir, pr.number, pr.repo);
     }
   }
+
+  return openPRs.length;
 }
 
 export async function startDaemon(config: ShepherdConfig): Promise<void> {
-  log(
+  log.info(
     `PR Shepherd daemon starting. Poll interval: ${config.pollIntervalSeconds}s, dry-run: ${config.dryRun}`,
   );
-  log(`Watching PRs by @${config.github.authorUsername}`);
-  log(`Routing issues to agent: ${config.notifications.notifyAgent}`);
+  log.info(`Watching PRs by @${config.github.authorUsername}`);
+  log.info(`Routing issues to agent: ${config.notifications.notifyAgent}`);
   if (config.reviewInbox.enabled) {
-    log(`Review inbox enabled for @${config.reviewInbox.githubUser}`);
+    log.info(`Review inbox enabled for @${config.reviewInbox.githubUser}`);
   }
   if (config.reviewFollowUp.enabled) {
-    log(`Review follow-up tracking enabled`);
+    log.info(`Review follow-up tracking enabled`);
   }
   if (config.reviewerNudge.enabled) {
-    log(`Reviewer nudge enabled (escalate after ${config.reviewerNudge.escalateAfterHours}h${config.reviewerNudge.businessDaysOnly ? ", business days only" : ""})`);
+    log.info(`Reviewer nudge enabled (escalate after ${config.reviewerNudge.escalateAfterHours}h${config.reviewerNudge.businessDaysOnly ? ", business days only" : ""})`);
   }
   if (config.replyWatch.enabled) {
-    log(`Reply watch enabled for @${config.reviewInbox.githubUser ?? config.github.authorUsername}`);
+    log.info(`Reply watch enabled for @${config.reviewInbox.githubUser ?? config.github.authorUsername}`);
   }
 
-  await pollAll(config);
-  await pollReviewInbox(config);
-  await pollReviewFollowUps(config);
-  await pollReviewerNudges(config);
-  await pollReplyWatch(config);
+  async function runCycle(): Promise<void> {
+    const authored = await pollAll(config);
+    const inbox = await pollReviewInbox(config);
+    const followups = await pollReviewFollowUps(config);
+    const nudges = await pollReviewerNudges(config);
+    const replyTargets = await pollReplyWatch(config);
 
-  setInterval(async () => {
-    await pollAll(config);
-    await pollReviewInbox(config);
-    await pollReviewFollowUps(config);
-    await pollReviewerNudges(config);
-    await pollReplyWatch(config);
-  }, config.pollIntervalSeconds * 1000);
+    const parts = [`${authored} authored`];
+    if (inbox !== null) parts.push(`${inbox.active} inbox${inbox.reReviews > 0 ? ` (${inbox.reReviews} re-review pending)` : ""}`);
+    if (followups !== null) parts.push(`${followups} followups`);
+    if (nudges !== null) parts.push(`${nudges} nudges`);
+    if (replyTargets !== null) parts.push(`${replyTargets} reply-watch`);
+    log.info(`poll ok — ${parts.join(", ")}`);
+  }
+
+  await runCycle();
+
+  setInterval(runCycle, config.pollIntervalSeconds * 1000);
 }

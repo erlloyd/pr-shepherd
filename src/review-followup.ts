@@ -8,7 +8,10 @@ import {
   fetchUserReviews,
   hasNewCommitsSince,
 } from "./github.js";
+import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewFollowUp, PREventRecord } from "./types.js";
+
+const log = createLogger("review-followup");
 
 function followUpPath(dataDir: string): string {
   return join(dataDir, "review-followups.json");
@@ -19,10 +22,6 @@ function ensureDir(filePath: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] [review-followup] ${msg}`);
-}
-
 export function readFollowUps(dataDir: string): ReviewFollowUp[] {
   const path = followUpPath(dataDir);
   if (!existsSync(path)) return [];
@@ -30,7 +29,7 @@ export function readFollowUps(dataDir: string): ReviewFollowUp[] {
   try {
     return JSON.parse(raw) as ReviewFollowUp[];
   } catch {
-    console.error(`[pr-shepherd] Corrupt review-followups file, treating as empty`);
+    log.warn(`Corrupt review-followups file, treating as empty`);
     return [];
   }
 }
@@ -75,8 +74,8 @@ function discoverReviewedPRs(username: string): RawSearchResult[] {
   return JSON.parse(json) as RawSearchResult[];
 }
 
-export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void> {
-  if (!config.reviewFollowUp.enabled || !config.reviewInbox.githubUser) return;
+export async function pollReviewFollowUps(config: ShepherdConfig): Promise<number | null> {
+  if (!config.reviewFollowUp.enabled || !config.reviewInbox.githubUser) return null;
 
   const username = config.reviewInbox.githubUser;
 
@@ -133,7 +132,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
       existing.push(followUp);
       existingKeys.add(key);
       updated = true;
-      log(`Now tracking PR #${pr.number} (${pr.repository.nameWithOwner}) for re-review follow-up.`);
+      log.info(`Now tracking PR #${pr.number} (${pr.repository.nameWithOwner}) for re-review follow-up.`);
     }
 
     for (const followUp of existing) {
@@ -145,7 +144,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
         if (prView.state !== "OPEN") {
           followUp.status = "closed";
           updated = true;
-          log(`PR #${followUp.number} (${followUp.repo}) closed/merged — removing from follow-up.`);
+          log.info(`PR #${followUp.number} (${followUp.repo}) closed/merged — removing from follow-up.`);
           continue;
         }
 
@@ -160,7 +159,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
         ) {
           followUp.status = "approved";
           updated = true;
-          log(`PR #${followUp.number} (${followUp.repo}) — we approved. Removing from follow-up.`);
+          log.info(`PR #${followUp.number} (${followUp.repo}) — we approved. Removing from follow-up.`);
           continue;
         }
 
@@ -174,7 +173,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
             const agent = config.reviewInbox.notifyAgent ?? config.notifications.notifyAgent!;
             const msg = formatReReviewMessage(followUp);
 
-            log(`PR #${followUp.number} (${followUp.repo}) has new commits since our review — requesting scoped re-review.`);
+            log.info(`PR #${followUp.number} (${followUp.repo}) has new commits since our review — requesting scoped re-review.`);
 
             if (!config.dryRun) {
               await sendToAgent(config, agent, msg);
@@ -197,7 +196,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
           }
         }
       } catch (err) {
-        log(`Error checking follow-up for PR #${followUp.number}: ${(err as Error).message}`);
+        log.error(`Error checking follow-up for PR #${followUp.number}: ${(err as Error).message}`);
       }
     }
 
@@ -210,10 +209,13 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<void>
     }
 
     if (active.length > 0) {
-      log(`Tracking ${active.length} PR(s) for re-review follow-up.`);
+      log.debug(`Tracking ${active.length} PR(s) for re-review follow-up.`);
     }
+
+    return active.length;
   } catch (err) {
-    log(`Error polling review follow-ups: ${(err as Error).message}`);
+    log.error(`Error polling review follow-ups: ${(err as Error).message}`);
+    return null;
   }
 }
 

@@ -7,7 +7,10 @@ import {
   fetchPRView,
   hasReviewerRespondedSince,
 } from "./github.js";
+import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewerNudge, PREventRecord } from "./types.js";
+
+const log = createLogger("reviewer-nudge");
 
 function nudgePath(dataDir: string): string {
   return join(dataDir, "reviewer-nudges.json");
@@ -18,10 +21,6 @@ function ensureDir(filePath: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] [reviewer-nudge] ${msg}`);
-}
-
 export function readNudges(dataDir: string): ReviewerNudge[] {
   const path = nudgePath(dataDir);
   if (!existsSync(path)) return [];
@@ -29,7 +28,7 @@ export function readNudges(dataDir: string): ReviewerNudge[] {
   try {
     return JSON.parse(raw) as ReviewerNudge[];
   } catch {
-    console.error(`[pr-shepherd] Corrupt reviewer-nudges file, treating as empty`);
+    log.warn(`Corrupt reviewer-nudges file, treating as empty`);
     return [];
   }
 }
@@ -112,8 +111,8 @@ export function registerNudge(
   writeNudges(dataDir, nudges);
 }
 
-export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> {
-  if (!config.reviewerNudge.enabled) return;
+export async function pollReviewerNudges(config: ShepherdConfig): Promise<number | null> {
+  if (!config.reviewerNudge.enabled) return null;
 
   const nudges = readNudges(config.dataDir);
   const now = new Date();
@@ -128,7 +127,7 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
       if (prView.state !== "OPEN") {
         nudge.status = "closed";
         updated = true;
-        log(`PR #${nudge.number} (${nudge.repo}) closed/merged — removing nudge for @${nudge.reviewer}.`);
+        log.info(`PR #${nudge.number} (${nudge.repo}) closed/merged — removing nudge for @${nudge.reviewer}.`);
         continue;
       }
 
@@ -138,14 +137,14 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
       ) {
         nudge.status = "responded";
         updated = true;
-        log(`@${nudge.reviewer} responded on PR #${nudge.number} — nudge complete.`);
+        log.info(`@${nudge.reviewer} responded on PR #${nudge.number} — nudge complete.`);
         continue;
       }
 
       if (nudge.status === "pending_comment") {
         const comment = `@${nudge.reviewer} — the feedback from your review has been addressed. This PR is ready for re-review when you have a moment.`;
 
-        log(`Posting @mention to @${nudge.reviewer} on PR #${nudge.number}.`);
+        log.info(`Posting @mention to @${nudge.reviewer} on PR #${nudge.number}.`);
         if (!config.dryRun) {
           try {
             postComment(nudge.number, nudge.repo, comment);
@@ -153,7 +152,7 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
             nudge.status = "waiting";
             updated = true;
           } catch (err) {
-            log(`Failed to post comment on PR #${nudge.number}: ${(err as Error).message}`);
+            log.error(`Failed to post comment on PR #${nudge.number}: ${(err as Error).message}`);
           }
         } else {
           nudge.commentPostedAt = now.toISOString();
@@ -180,7 +179,7 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
             "Please follow up with them directly (e.g., Slack, DM) to unblock this PR.",
           ].join("\n");
 
-          log(`Escalating: @${nudge.reviewer} unresponsive on PR #${nudge.number} (${Math.round(hours)}h).`);
+          log.info(`Escalating: @${nudge.reviewer} unresponsive on PR #${nudge.number} (${Math.round(hours)}h).`);
 
           if (!config.dryRun) {
             await sendToAgent(config, agent, msg);
@@ -207,7 +206,7 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
         }
       }
     } catch (err) {
-      log(`Error processing nudge for PR #${nudge.number}: ${(err as Error).message}`);
+      log.error(`Error processing nudge for PR #${nudge.number}: ${(err as Error).message}`);
     }
   }
 
@@ -220,6 +219,8 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<void> 
   }
 
   if (active.length > 0) {
-    log(`Tracking ${active.length} reviewer nudge(s).`);
+    log.debug(`Tracking ${active.length} reviewer nudge(s).`);
   }
+
+  return active.length;
 }

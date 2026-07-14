@@ -2,7 +2,10 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createLogger } from "./log.js";
 import type { ShepherdConfig } from "./types.js";
+
+const log = createLogger("conductor");
 
 // Parses PR identity from pr-shepherd formatted messages.
 // Tries GitHub URL first, then the "#N (owner/repo)" form present in all format* messages.
@@ -43,7 +46,7 @@ function fetchHeadBranch(prNumber: number, nameWithOwner: string): string {
     ).trim();
     return result || "unknown";
   } catch (err) {
-    console.log(`[pr-shepherd] failed to fetch head branch for #${prNumber} (${nameWithOwner}): ${(err as Error).message}`);
+    log.warn(`failed to fetch head branch for #${prNumber} (${nameWithOwner}): ${(err as Error).message}`);
     return "unknown";
   }
 }
@@ -59,7 +62,7 @@ export function routeToAgent(
 ): boolean {
   const identity = parsePRIdentity(message);
   if (!identity) {
-    console.log("[pr-shepherd] couldn't parse PR identity from message; skipping ateam route-pr-event");
+    log.warn("couldn't parse PR identity from message; skipping ateam route-pr-event");
     return false;
   }
 
@@ -70,7 +73,7 @@ export function routeToAgent(
   const ateam = process.env.PR_SHEPHERD_ATEAM_PATH ?? "ateam";
 
   if (config.dryRun) {
-    console.log(`[pr-shepherd] [dry-run] would route PR #${prNumber} (${nameWithOwner}) to ateam route-pr-event`);
+    log.info(`[dry-run] would route PR #${prNumber} (${nameWithOwner}) to ateam route-pr-event`);
     return true;
   }
 
@@ -91,18 +94,18 @@ export function routeToAgent(
       args.push("--pr-url", prUrl);
     }
 
-    console.log(`[pr-shepherd][debug] exec: ${ateam} ${args.join(" ")}`);
+    log.debug(`exec: ${ateam} ${args.join(" ")}`);
 
     const output = execFileSync(ateam, args, { encoding: "utf-8", timeout: 30_000, stdio: ["pipe", "pipe", "pipe"] });
     if (output && output.trim()) {
-      console.log(`[pr-shepherd][debug] route-pr-event stdout: ${output.trim()}`);
+      log.debug(`route-pr-event stdout: ${output.trim().replace(/\s+/g, " ").slice(0, 200)}`);
     }
-    console.log(`[pr-shepherd][debug] route-pr-event exited successfully`);
+    log.debug(`route-pr-event exited successfully`);
     return true;
   } catch (err) {
     const error = err as Error & { stdout?: string; stderr?: string };
-    const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim();
-    console.log(`[pr-shepherd] ateam route-pr-event failed for PR #${prNumber}: ${error.message}${captured ? `\n${captured}` : ""}`);
+    const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim().slice(0, 500);
+    log.error(`ateam route-pr-event failed for PR #${prNumber}: ${error.message}${captured ? `\n${captured}` : ""}`);
     return false;
   } finally {
     try { unlinkSync(tmpFile); } catch { /* ignore */ }

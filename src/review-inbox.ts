@@ -5,7 +5,10 @@ import { sendToAgent } from "./notifications.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
 import { fetchCommentsByUsers } from "./github.js";
+import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
+
+const log = createLogger("review-inbox");
 
 type RawSearchResult = {
   number: number;
@@ -25,10 +28,6 @@ function ensureDir(filePath: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-function log(msg: string): void {
-  console.log(`[${new Date().toISOString()}] [review-inbox] ${msg}`);
-}
-
 export function readInbox(dataDir: string): ReviewAssignment[] {
   const path = inboxPath(dataDir);
   if (!existsSync(path)) return [];
@@ -36,7 +35,7 @@ export function readInbox(dataDir: string): ReviewAssignment[] {
   try {
     return JSON.parse(raw) as ReviewAssignment[];
   } catch {
-    console.error(`[pr-shepherd] Corrupt review inbox at ${path}, treating as empty`);
+    log.warn(`Corrupt review inbox at ${path}, treating as empty`);
     return [];
   }
 }
@@ -161,8 +160,10 @@ export function fetchReviewRequests(githubUser: string): RawSearchResult[] {
   return JSON.parse(json) as RawSearchResult[];
 }
 
-export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
-  if (!config.reviewInbox.enabled || !config.reviewInbox.githubUser) return;
+export async function pollReviewInbox(
+  config: ShepherdConfig,
+): Promise<{ active: number; reReviews: number } | null> {
+  if (!config.reviewInbox.enabled || !config.reviewInbox.githubUser) return null;
 
   try {
     const results = fetchReviewRequests(config.reviewInbox.githubUser);
@@ -200,7 +201,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
           existing.reReviewDispatchedAt = null;
           existing.completedAt = null;
           updated = true;
-          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested.`);
+          log.info(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested.`);
         }
         continue;
       }
@@ -223,9 +224,9 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
           inbox.push(assignment);
           byKey.set(key, assignment);
           updated = true;
-          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested (no prior inbox record).`);
+          log.info(`PR #${pr.number} (${pr.repository.nameWithOwner}) — review re-requested (no prior inbox record).`);
         } else {
-          log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — already reviewed.`);
+          log.debug(`PR #${pr.number} (${pr.repository.nameWithOwner}) — already reviewed.`);
         }
         continue;
       }
@@ -251,7 +252,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
       updated = true;
 
       if (initialStatus === "pending_bot_review") {
-        log(`PR #${pr.number} (${pr.repository.nameWithOwner}) — waiting for ${waitForBot} to review first.`);
+        log.info(`PR #${pr.number} (${pr.repository.nameWithOwner}) — waiting for ${waitForBot} to review first.`);
       }
     }
 
@@ -277,7 +278,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
               `This PR has been ${prState.toLowerCase()} before our review was posted.`,
               "Please free the worker assigned to this review — it can be reset for other work.",
             ].join("\n");
-            log(`PR #${assignment.number} ${prState.toLowerCase()} before review — notifying to free worker.`);
+            log.info(`PR #${assignment.number} ${prState.toLowerCase()} before review — notifying to free worker.`);
             if (!config.dryRun) {
               await notifyAgent(config, msg);
             }
@@ -305,7 +306,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
             "",
             "Our review has been submitted. Please free the worker assigned to this review.",
           ].join("\n");
-          log(`PR #${assignment.number} — our review has been submitted. Notifying to free worker.`);
+          log.info(`PR #${assignment.number} — our review has been submitted. Notifying to free worker.`);
           if (!config.dryRun) {
             await notifyAgent(config, msg);
           }
@@ -327,7 +328,7 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
               "",
               "Our follow-up review has been submitted. Please free the worker assigned to this review.",
             ].join("\n");
-            log(`PR #${assignment.number} — re-review submitted. Notifying to free worker.`);
+            log.info(`PR #${assignment.number} — re-review submitted. Notifying to free worker.`);
             if (!config.dryRun) {
               await notifyAgent(config, msg);
             }
@@ -345,31 +346,31 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
           }
 
           if (botAutoApproved(assignment.number, assignment.repo, waitForBot)) {
-            log(`PR #${assignment.number} — ${waitForBot} auto-approved. Skipping human review.`);
+            log.info(`PR #${assignment.number} — ${waitForBot} auto-approved. Skipping human review.`);
             assignment.status = "closed";
             assignment.completedAt = new Date().toISOString();
             updated = true;
             continue;
           }
 
-          log(`PR #${assignment.number} — ${waitForBot} reviewed but did not auto-approve. Dispatching for human review.`);
+          log.info(`PR #${assignment.number} — ${waitForBot} reviewed but did not auto-approve. Dispatching for human review.`);
           assignment.status = "dispatched";
         }
 
         // Dispatch notification for newly dispatched assignments
         if (assignment.status === "dispatched" && assignment.notifiedAt) {
-          log(`[pr-shepherd][debug] PR #${assignment.number} (${assignment.repo}) already notified at ${assignment.notifiedAt} — skipping dispatch`);
+          log.debug(`PR #${assignment.number} (${assignment.repo}) already notified at ${assignment.notifiedAt} — skipping dispatch`);
         } else if (assignment.status === "dispatched" && !assignment.notifiedAt) {
           const msg = formatReviewAssignmentMessage(assignment);
           if (config.dryRun) {
-            log(`[pr-shepherd][debug] [dry-run] would dispatch review of PR #${assignment.number} (${assignment.repo}) to ateam — skipping (notifiedAt NOT persisted)`);
+            log.info(`[dry-run] would dispatch review of PR #${assignment.number} (${assignment.repo}) to ateam — skipping (notifiedAt NOT persisted)`);
           } else {
-            log(`[pr-shepherd][debug] dispatching review of PR #${assignment.number} (${assignment.repo}) to ateam`);
+            log.debug(`dispatching review of PR #${assignment.number} (${assignment.repo}) to ateam`);
             routeToAgent(config, msg, { reviewRequest: true });
             assignment.notifiedAt = new Date().toISOString();
             updated = true;
 
-            log(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
+            log.info(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
 
             appendEvent(config.dataDir, {
               ts: assignment.notifiedAt,
@@ -387,11 +388,11 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
         if (assignment.status === "re_review_dispatched" && !assignment.reReviewDispatchedAt) {
           const msg = formatReReviewMessage(assignment);
           if (config.dryRun) {
-            log(`[dry-run] would dispatch re-review of PR #${assignment.number} (${assignment.repo}) to ateam`);
+            log.info(`[dry-run] would dispatch re-review of PR #${assignment.number} (${assignment.repo}) to ateam`);
           } else if (routeToAgent(config, msg, { transition: "re_review" })) {
             assignment.reReviewDispatchedAt = new Date().toISOString();
             updated = true;
-            log(`Re-review dispatched: PR #${assignment.number} (${assignment.repo})`);
+            log.info(`Re-review dispatched: PR #${assignment.number} (${assignment.repo})`);
 
             appendEvent(config.dataDir, {
               ts: assignment.reReviewDispatchedAt,
@@ -403,11 +404,11 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
               details: { type: "re_review_inbox", title: assignment.title, url: assignment.url },
             });
           } else {
-            log(`Re-review dispatch failed for PR #${assignment.number} (${assignment.repo}) — will retry next poll`);
+            log.info(`Re-review dispatch failed for PR #${assignment.number} (${assignment.repo}) — will retry next poll`);
           }
         }
       } catch (err) {
-        log(`Error processing assignment PR #${assignment.number}: ${(err as Error).message}`);
+        log.error(`Error processing assignment PR #${assignment.number}: ${(err as Error).message}`);
       }
     }
 
@@ -427,23 +428,25 @@ export async function pollReviewInbox(config: ShepherdConfig): Promise<void> {
     const dispatched = active.filter((a) => a.status === "dispatched").length;
     const reReviews = active.filter((a) => a.status === "re_review_dispatched").length;
     if (pending > 0 || dispatched > 0 || reReviews > 0) {
-      log(`Active: ${dispatched} dispatched, ${reReviews} re-reviews pending, ${pending} waiting for bot review.`);
+      log.debug(`Active: ${dispatched} dispatched, ${reReviews} re-reviews pending, ${pending} waiting for bot review.`);
     }
+    return { active: pending + dispatched + reReviews, reReviews };
   } catch (err) {
-    log(`Error polling review inbox: ${(err as Error).message}`);
+    log.error(`Error polling review inbox: ${(err as Error).message}`);
+    return null;
   }
 }
 
 async function notifyAgent(config: ShepherdConfig, message: string): Promise<void> {
   const agent = config.reviewInbox.notifyAgent ?? config.notifications.notifyAgent;
   if (!agent) {
-    log("No notify agent configured for review inbox");
+    log.warn("No notify agent configured for review inbox");
     return;
   }
   try {
     await sendToAgent(config, agent, message);
   } catch (err) {
-    log(`Failed to notify ${agent}: ${(err as Error).message}`);
+    log.error(`Failed to notify ${agent}: ${(err as Error).message}`);
   }
 }
 
