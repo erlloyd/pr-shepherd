@@ -6,6 +6,7 @@ import { startDaemon, discoverAuthoredPRs } from "./daemon.js";
 import { readEvents, readEventsForPR } from "./events.js";
 import { readCache } from "./state-cache.js";
 import { readInbox } from "./review-inbox.js";
+import { setVerbose } from "./log.js";
 import { existsSync } from "node:fs";
 
 // Auto-load .env (e.g. PR_SHEPHERD_ATEAM_PATH) from the working dir if present.
@@ -24,12 +25,14 @@ program
   .description("Start the polling daemon")
   .option("-c, --config <path>", "Path to shepherd.config.json")
   .option("--dry-run", "Log actions without executing them")
+  .option("--verbose", "Enable verbose (debug-level) logging")
   .option("--interval <seconds>", "Poll interval in seconds", parseInt)
   .action(async (opts) => {
     const overrides: Record<string, unknown> = {};
     if (opts.dryRun) overrides.dryRun = true;
     if (opts.interval) overrides.pollIntervalSeconds = opts.interval;
 
+    setVerbose(Boolean(opts.verbose) || process.env.PR_SHEPHERD_VERBOSE === "true");
     const config = loadConfig(opts.config, overrides);
     await startDaemon(config);
   });
