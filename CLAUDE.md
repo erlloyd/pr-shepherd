@@ -86,10 +86,24 @@ make events         # Event audit log
 make inbox          # Pending review assignments
 ```
 
+## Logging
+
+Every log line is formatted `HH:MM:SS LEVEL [subsystem] message` (e.g.
+`14:32:07 INFO  [daemon] poll ok — 3 authored, 1 inbox`). `INFO`/`WARN`/`ERROR`
+always print; `DEBUG` is gated behind verbose mode.
+
+Enable verbose (debug-level) logging with `--verbose` or
+`PR_SHEPHERD_VERBOSE=true`. Each poll cycle emits a `poll ok — ...` heartbeat
+from `runCycle` in `src/daemon.ts` summarizing every subsystem's count — a
+silent console means the daemon is down. Each of the five pollers is wrapped
+in its own try/catch (`safe()` in `startDaemon`), so one poller throwing
+logs `<name> poll failed: <message>` and falls back to a placeholder count
+rather than skipping the heartbeat or crashing the process.
+
 ## Tests
 
 ```bash
-npm test            # 182 tests across 9 files
+npm test            # 198 tests across 10 files
 npm run typecheck   # Clean TypeScript check
 ```
 

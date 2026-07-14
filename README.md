@@ -96,7 +96,7 @@ make inbox          # Show pending review assignments
 
 Three layers, in priority order:
 
-1. **CLI flags** — `--dry-run`, `--interval`, `-c <path>`
+1. **CLI flags** — `--dry-run`, `--interval`, `-c <path>`, `--verbose`
 2. **Environment variables** — `PR_SHEPHERD_*` (see `.env.example`)
 3. **Config file** — `shepherd.config.json` in the working directory
 
@@ -191,7 +191,16 @@ PR_SHEPHERD_DEFAULT_REPO=your-org/your-repo
 PR_SHEPHERD_WEBHOOK_URL=https://hooks.slack.com/services/...
 PR_SHEPHERD_REVIEW_INBOX_ENABLED=true
 PR_SHEPHERD_REVIEW_INBOX_USER=your-github-username
+PR_SHEPHERD_VERBOSE=true                        # enable debug-level logging (same as --verbose)
 ```
+
+## Logging
+
+Every log line is formatted `HH:MM:SS LEVEL [subsystem] message`. `INFO`,
+`WARN`, and `ERROR` always print; `DEBUG` lines are gated behind verbose
+mode — enable them with `--verbose` or `PR_SHEPHERD_VERBOSE=true`. Each poll
+cycle ends with a `poll ok — ...` heartbeat summarizing every subsystem's
+count, so a silent console means the daemon is down.
 
 ## CLI Commands
 
@@ -199,6 +208,7 @@ PR_SHEPHERD_REVIEW_INBOX_USER=your-github-username
 pr-shepherd start [options]    # Start the polling daemon
   --dry-run                    # Log without routing events
   --interval <seconds>         # Override poll interval
+  --verbose                    # Enable verbose (debug-level) logging
   -c, --config <path>          # Config file path
 
 pr-shepherd status [options]   # Show watched PRs and their current state
