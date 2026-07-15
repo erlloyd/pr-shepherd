@@ -341,7 +341,6 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       tryTransition(config, pr, "auto_merge_enabled");
     }
 
-    let enteredMergeQueueThisPoll = false;
     if (pr.state === "AUTO_MERGE_ENABLED") {
       const checkResult = evaluateChecks(checks, config);
       if (checkResult.status === "fail") {
@@ -367,26 +366,34 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
           if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
         }
       }
-
-      if (
-        config.mergeQueue.enabled &&
-        pr.state === "AUTO_MERGE_ENABLED" &&
-        fetchMergeQueueStatus(pr.number, pr.repo)
-      ) {
-        tryTransition(config, pr, "entered_merge_queue");
-        enteredMergeQueueThisPoll = true;
-        log.info(`PR #${pr.number} entered the merge queue.`);
-        const msg = formatMergeQueueEnteredMessage(pr.number, pr.repo);
-        if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
-      }
     }
 
-    if (
-      config.mergeQueue.enabled &&
-      pr.state === "IN_MERGE_QUEUE" &&
-      !enteredMergeQueueThisPoll &&
-      !fetchMergeQueueStatus(pr.number, pr.repo)
-    ) {
+    // Merge queue membership is a GitHub-side fact, not something shepherd
+    // drives — a human can queue a PR themselves after reviewing it (even
+    // with fewer approvals than `requiredApprovals`), independent of our own
+    // AUTO_MERGE_ENABLED gating. Queue entry implies approval, so if we
+    // haven't modeled that yet (PR still AWAITING_REVIEW/STALE), synthesize
+    // the all_approved transition first — same side effects a normal
+    // approval gets.
+    if (config.mergeQueue.enabled && pr.state !== "IN_MERGE_QUEUE") {
+      if (fetchMergeQueueStatus(pr.number, pr.repo)) {
+        if (pr.state === "AWAITING_REVIEW" || pr.state === "STALE") {
+          const reviewResult = evaluateReviews(reviews, config);
+          const details = { approvals: reviewResult.approvals };
+          tryTransition(config, pr, "all_approved", details);
+          await handleTransition(config, pr, "APPROVED", details);
+        }
+
+        const next = tryTransition(config, pr, "entered_merge_queue");
+        if (next) {
+          log.info(`PR #${pr.number} entered the merge queue.`);
+          const msg = formatMergeQueueEnteredMessage(pr.number, pr.repo);
+          if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
+        } else {
+          log.warn(`PR #${pr.number} is in the merge queue but shepherd's state (${pr.state}) can't model queue entry — skipping transition.`);
+        }
+      }
+    } else if (config.mergeQueue.enabled && !fetchMergeQueueStatus(pr.number, pr.repo)) {
       tryTransition(config, pr, "left_queue");
       log.info(`PR #${pr.number} left the merge queue without merging — escalating.`);
       const msg = formatMergeQueueLeftMessage(pr.number, pr.repo);

@@ -190,3 +190,114 @@ describe("pollAll — reconciling PRs that dropped out of the open set", () => {
     expect(mockedRoute).not.toHaveBeenCalled();
   });
 });
+
+describe("pollAll — merge queue entered from AWAITING_REVIEW (manual override)", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_mergequeue");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedRoute: ReturnType<typeof vi.mocked<any>>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { routeToAgent } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedRoute = vi.mocked(routeToAgent);
+    mockedExec.mockReset();
+    mockedRoute.mockReset();
+  });
+
+  afterEach(() => rmSync(TMP, { recursive: true, force: true }));
+
+  function makeConfig(): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      autoMerge: false,
+      requiredApprovals: 2,
+      github: { defaultRepo: null, authorUsername: "erlloyd", ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+      mergeQueue: { enabled: true },
+    };
+  }
+
+  function cachedPR(): WatchedPR {
+    return {
+      number: 4107,
+      repo: "acme/widgets",
+      title: "fix: something",
+      url: "https://github.com/acme/widgets/pull/4107",
+      state: "AWAITING_REVIEW",
+      headSha: "abc123",
+      lastCheckedAt: "2026-07-15T13:20:21.000Z",
+      lastEventAt: "2026-07-15T13:20:21.000Z",
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+  }
+
+  it("synthesizes all_approved (with the real, sub-threshold approval count) before entering the queue, and logs both", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR());
+
+    mockedExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            number: 4107,
+            repository: { name: "widgets", nameWithOwner: "acme/widgets" },
+            title: "fix: something",
+            url: "https://github.com/acme/widgets/pull/4107",
+            isDraft: false,
+            updatedAt: new Date().toISOString(),
+          },
+        ]) as any,
+      ) // discoverAuthoredPRs
+      .mockReturnValueOnce(
+        JSON.stringify({
+          number: 4107,
+          state: "OPEN",
+          reviewDecision: "APPROVED",
+          mergeStateStatus: "CLEAN",
+          mergeable: "MERGEABLE",
+          autoMergeRequest: null,
+          mergedAt: null,
+          closedAt: null,
+          headRefOid: "abc123",
+        }) as any,
+      ) // fetchPRView
+      .mockReturnValueOnce("[]" as any) // fetchChecks
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [
+            {
+              author: { login: "bloedorn-" },
+              state: "APPROVED",
+              body: "",
+              submittedAt: "2026-07-15T13:19:04Z",
+            },
+          ],
+        }) as any,
+      ) // fetchReviews — only 1 approval, below requiredApprovals: 2
+      .mockReturnValueOnce(
+        JSON.stringify({
+          data: { repository: { pullRequest: { isInMergeQueue: true } } },
+        }) as any,
+      ); // fetchMergeQueueStatus
+
+    await pollAll(config);
+
+    const cached = readCache(TMP);
+    expect(cached).toHaveLength(1);
+    expect(cached[0].state).toBe("IN_MERGE_QUEUE");
+
+    // Both the (manual-override) approval notification and the merge-queue
+    // notification must go out — entering the queue implies approval.
+    expect(mockedRoute).toHaveBeenCalledTimes(2);
+    expect(mockedRoute.mock.calls[0][1]).toContain("Approved");
+    expect(mockedRoute.mock.calls[1][1]).toContain("merge queue");
+  });
+});

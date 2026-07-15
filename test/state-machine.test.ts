@@ -140,6 +140,62 @@ describe("state-machine", () => {
     }
   });
 
+  describe("merged from any non-terminal state", () => {
+    // A PR can be merged manually on GitHub regardless of shepherd's own
+    // review/auto-merge tracking (e.g. merged while still AWAITING_REVIEW
+    // because a human approved with fewer reviews than shepherd requires).
+    const nonTerminalStates: PRState[] = [
+      "OPENED",
+      "CI_PENDING",
+      "CI_PASSED",
+      "CI_FAILED",
+      "AWAITING_REVIEW",
+      "CHANGES_REQUESTED",
+      "APPROVED",
+      "AUTO_MERGE_ENABLED",
+      "IN_MERGE_QUEUE",
+      "STALE",
+    ];
+
+    for (const state of nonTerminalStates) {
+      it(`moves ${state} → MERGED on merged`, () => {
+        expect(transition(state, "merged")).toBe("MERGED");
+      });
+    }
+  });
+
+  describe("entered_merge_queue only reachable via APPROVED/AUTO_MERGE_ENABLED", () => {
+    // Entering the queue implies approval, so this table only models the
+    // event from states shepherd already considers approved. daemon.ts is
+    // responsible for synthesizing `all_approved` first when queue
+    // membership is detected on an AWAITING_REVIEW/STALE PR.
+    it("moves APPROVED → IN_MERGE_QUEUE on entered_merge_queue", () => {
+      expect(transition("APPROVED", "entered_merge_queue")).toBe("IN_MERGE_QUEUE");
+    });
+
+    it("moves AUTO_MERGE_ENABLED → IN_MERGE_QUEUE on entered_merge_queue (unchanged)", () => {
+      expect(transition("AUTO_MERGE_ENABLED", "entered_merge_queue")).toBe(
+        "IN_MERGE_QUEUE",
+      );
+    });
+
+    const notReachable: PRState[] = [
+      "OPENED",
+      "CI_PENDING",
+      "CI_PASSED",
+      "CI_FAILED",
+      "AWAITING_REVIEW",
+      "CHANGES_REQUESTED",
+      "STALE",
+    ];
+
+    for (const state of notReachable) {
+      it(`rejects ${state} + entered_merge_queue directly (must go through all_approved first)`, () => {
+        expect(transition(state, "entered_merge_queue")).toBeNull();
+      });
+    }
+  });
+
   describe("terminal states reject all events", () => {
     const allEvents: PREvent[] = [
       "poll_started",
