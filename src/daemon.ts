@@ -285,6 +285,11 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
     const checks = parseChecks(rawChecks, config);
     const reviews = parseReviews(rawReviews, config);
 
+    const reviewSnapshot = evaluateReviews(reviews, config);
+    if (reviewSnapshot.approvals > 0) {
+      log.info(`PR #${pr.number} (${pr.repo}) has ${reviewSnapshot.approvals}/${config.requiredApprovals} approval(s) — review status: ${reviewSnapshot.status}, PR state: ${pr.state}`);
+    }
+
     if (await checkMergedOrClosed(config, pr, prView)) return;
 
     if (pr.headSha && prView.headRefOid !== pr.headSha) {
