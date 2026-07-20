@@ -335,7 +335,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
     }
 
     if (pr.state === "CI_PENDING") {
-      if (prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
+      if (!config.mergeQueue.enabled && prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
         log.info(`PR #${pr.number} is behind base branch while CI is running — updating branch now (CI will restart).`);
         if (!config.dryRun) {
           try {
@@ -370,13 +370,17 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       }
 
       if (prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
-        log.info(`PR #${pr.number} is behind base branch — updating branch.`);
-        if (!config.dryRun) {
-          try {
-            updateBranch(pr.number, pr.repo);
-            log.info(`Branch updated for PR #${pr.number}.`);
-          } catch (err) {
-            log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
+        if (config.mergeQueue.enabled) {
+          log.debug(`PR #${pr.number} is behind base branch — merge queue handles rebasing, skipping update-branch.`);
+        } else {
+          log.info(`PR #${pr.number} is behind base branch — updating branch.`);
+          if (!config.dryRun) {
+            try {
+              updateBranch(pr.number, pr.repo);
+              log.info(`Branch updated for PR #${pr.number}.`);
+            } catch (err) {
+              log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
+            }
           }
         }
       }
