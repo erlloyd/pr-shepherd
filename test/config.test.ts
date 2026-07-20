@@ -112,6 +112,27 @@ describe("config", () => {
     expect(config.dryRun).toBe(true);
   });
 
+  it("defaults github.org to null", () => {
+    process.env.PR_SHEPHERD_AUTHOR_USERNAME = "testuser";
+    const config = loadConfig(join(TMP, "nonexistent.json"));
+    expect(config.github.org).toBeNull();
+  });
+
+  it("reads github.org from the config file", () => {
+    const path = join(TMP, "org.json");
+    writeJson(path, { github: { authorUsername: "testuser", org: "acme" } });
+    const config = loadConfig(path);
+    expect(config.github.org).toBe("acme");
+  });
+
+  it("applies PR_SHEPHERD_GITHUB_ORG env override over file config", () => {
+    const path = join(TMP, "org-env.json");
+    writeJson(path, { github: { authorUsername: "testuser", org: "filecorp" } });
+    process.env.PR_SHEPHERD_GITHUB_ORG = "acme";
+    const config = loadConfig(path);
+    expect(config.github.org).toBe("acme");
+  });
+
   it("deep merges nested objects without clobbering sibling keys", () => {
     const path = join(TMP, "test.json");
     writeJson(path, {

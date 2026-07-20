@@ -450,4 +450,64 @@ describe("pollReplyWatch", () => {
     expect(mockedExec).not.toHaveBeenCalled();
     expect(mockedRoute).not.toHaveBeenCalled();
   });
+
+  it("passes --owner to the reviewed-by search and drops out-of-org results when org is set", async () => {
+    // Search returns an acme PR despite the megacorp --owner qualifier
+    mockedExec.mockReturnValueOnce(searchResult as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(
+      makeConfig({
+        github: { defaultRepo: null, authorUsername: "shepherd", org: "megacorp", ignoreRepos: [] },
+      }),
+    );
+
+    expect(mockedExec.mock.calls[0][1]).toContain("--owner=megacorp");
+    // The out-of-org PR was dropped — no thread fetch for it, never seeded.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedRoute).not.toHaveBeenCalled();
+  });
+
+  it("omits --owner from the reviewed-by search when org is unset", async () => {
+    mockedExec.mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(makeConfig());
+
+    expect(
+      (mockedExec.mock.calls[0][1] as string[]).some((a) => a.startsWith("--owner")),
+    ).toBe(false);
+  });
+
+  it("excludes out-of-org cached authored PRs from the scan population", async () => {
+    const watched: WatchedPR = {
+      number: 12,
+      repo: "acme/ours",
+      title: "our feature",
+      url: "https://github.com/acme/ours/pull/12",
+      state: "AWAITING_REVIEW",
+      headSha: null,
+      lastCheckedAt: null,
+      lastEventAt: null,
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+    writeCache(TMP_RW, [watched]);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 12, repo: "acme/ours", lastReplyNotifiedAt: "2026-07-14T00:00:00Z" }]),
+    );
+    mockedExec.mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>); // scoped reviewed-by search
+
+    await pollReplyWatch(
+      makeConfig({
+        github: { defaultRepo: null, authorUsername: "shepherd", org: "megacorp", ignoreRepos: [] },
+      }),
+    );
+
+    // No thread scan for the out-of-org authored PR.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedRoute).not.toHaveBeenCalled();
+  });
 });

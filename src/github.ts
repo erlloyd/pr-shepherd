@@ -34,6 +34,15 @@ function gh(args: string[]): string {
   }).trim();
 }
 
+// Defensive re-filter behind the `--owner` search qualifier — gh search
+// qualifiers can be lossy. A null/unset org matches everything, preserving
+// pre-scoping behavior.
+export function belongsToOrg(nameWithOwner: string, org: string | null | undefined): boolean {
+  if (!org) return true;
+  const owner = nameWithOwner.split("/")[0] ?? "";
+  return owner.toLowerCase() === org.toLowerCase();
+}
+
 export function fetchPRView(number: number, repo: string): RawPRView {
   const json = gh([
     "pr",

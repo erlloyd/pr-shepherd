@@ -12,6 +12,7 @@ import {
   fetchCommentsByUsers,
   selectNewComments,
   fetchMergeQueueStatus,
+  belongsToOrg,
 } from "./github.js";
 import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-cache.js";
 import { appendEvent } from "./events.js";
@@ -85,25 +86,32 @@ function tryTransition(
   return next;
 }
 
-export function filterAuthoredPRs(prs: RawSearchResult[], ignoreRepos: string[]): RawSearchResult[] {
-  return prs.filter((pr) => !pr.isDraft && !ignoreRepos.includes(pr.repository.nameWithOwner));
+export function filterAuthoredPRs(
+  prs: RawSearchResult[],
+  ignoreRepos: string[],
+  org: string | null = null,
+): RawSearchResult[] {
+  return prs.filter(
+    (pr) =>
+      !pr.isDraft &&
+      !ignoreRepos.includes(pr.repository.nameWithOwner) &&
+      belongsToOrg(pr.repository.nameWithOwner, org),
+  );
 }
 
-export function discoverAuthoredPRs(username: string): RawSearchResult[] {
-  const json = execFileSync(
-    "gh",
-    [
-      "search",
-      "prs",
-      `--author=${username}`,
-      "--state=open",
-      "--json",
-      "number,repository,title,url,isDraft,updatedAt",
-      "--limit",
-      "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+export function discoverAuthoredPRs(username: string, org?: string | null): RawSearchResult[] {
+  const args = [
+    "search",
+    "prs",
+    `--author=${username}`,
+    "--state=open",
+    "--json",
+    "number,repository,title,url,isDraft,updatedAt",
+    "--limit",
+    "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as RawSearchResult[];
 }
 
@@ -500,17 +508,18 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
 
 export async function pollAll(config: ShepherdConfig): Promise<number> {
   const username = config.github.authorUsername!;
+  const org = config.github.org;
   log.debug(`Discovering open PRs by @${username}...`);
 
   let discovered: RawSearchResult[];
   try {
-    discovered = discoverAuthoredPRs(username);
+    discovered = discoverAuthoredPRs(username, org);
   } catch (err) {
     log.error(`Error discovering PRs: ${(err as Error).message}`);
     return 0;
   }
 
-  const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos);
+  const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos, org);
   log.debug(`Found ${openPRs.length} open non-draft PR(s).`);
 
   for (const raw of openPRs) {
@@ -545,6 +554,15 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
   for (const pr of cached) {
     const key = `${pr.repo}#${pr.number}`;
     if (openKeys.has(key) || isTerminal(pr.state)) continue;
+
+    // A cached PR outside the configured org can never reappear in the scoped
+    // search, so the merged/closed reconciliation below would re-poll it every
+    // cycle forever — drain it from the cache silently instead.
+    if (!belongsToOrg(pr.repo, org)) {
+      log.info(`PR #${pr.number} (${pr.repo}) is outside configured org "${org}" — removing from cache.`);
+      removeCachedPR(config.dataDir, pr.number, pr.repo);
+      continue;
+    }
 
     try {
       const prView = fetchPRView(pr.number, pr.repo);
