@@ -79,6 +79,25 @@ describe("filterAuthoredPRs", () => {
     ]);
     expect(result).toHaveLength(0);
   });
+
+  it("drops PRs outside the configured org", () => {
+    const prs = [
+      makePR("acme/widgets", false, 1),
+      makePR("megacorp/widgets", false, 2),
+    ];
+    const result = filterAuthoredPRs(prs, [], "acme");
+    expect(result).toHaveLength(1);
+    expect(result[0].repository.nameWithOwner).toBe("acme/widgets");
+  });
+
+  it("passes PRs from any org when org is null", () => {
+    const prs = [
+      makePR("acme/widgets", false, 1),
+      makePR("megacorp/widgets", false, 2),
+    ];
+    expect(filterAuthoredPRs(prs, [], null)).toHaveLength(2);
+    expect(filterAuthoredPRs(prs, [])).toHaveLength(2);
+  });
 });
 
 describe("pollAll — reconciling PRs that dropped out of the open set", () => {
@@ -188,6 +207,121 @@ describe("pollAll — reconciling PRs that dropped out of the open set", () => {
 
     expect(readCache(TMP)).toHaveLength(0);
     expect(mockedRoute).not.toHaveBeenCalled();
+  });
+});
+
+describe("pollAll — org scoping", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_org");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedRoute: ReturnType<typeof vi.mocked<any>>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { routeToAgent } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedRoute = vi.mocked(routeToAgent);
+    mockedExec.mockReset();
+    mockedRoute.mockReset();
+  });
+
+  afterEach(() => rmSync(TMP, { recursive: true, force: true }));
+
+  function makeConfig(org: string | null): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      github: { defaultRepo: null, authorUsername: "erlloyd", org, ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+    };
+  }
+
+  function cachedPR(repo: string): WatchedPR {
+    return {
+      number: 12,
+      repo,
+      title: "feat: something",
+      url: `https://github.com/${repo}/pull/12`,
+      state: "AWAITING_REVIEW",
+      headSha: "abc123",
+      lastCheckedAt: "2026-07-03T16:01:42.000Z",
+      lastEventAt: "2026-07-03T16:01:42.000Z",
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+  }
+
+  it("passes --owner to the authored-PR search when org is set", async () => {
+    mockedExec.mockReturnValueOnce("[]" as any);
+    await pollAll(makeConfig("acme"));
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedExec.mock.calls[0][1]).toContain("--owner=acme");
+  });
+
+  it("omits --owner when org is unset", async () => {
+    mockedExec.mockReturnValueOnce("[]" as any);
+    await pollAll(makeConfig(null));
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedExec.mock.calls[0][1]).not.toContain("--owner=acme");
+    expect(
+      (mockedExec.mock.calls[0][1] as string[]).some((a) => a.startsWith("--owner")),
+    ).toBe(false);
+  });
+
+  it("re-filters out-of-org search results defensively (never polls them)", async () => {
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          number: 12,
+          repository: { name: "widgets", nameWithOwner: "megacorp/widgets" },
+          title: "feat: something",
+          url: "https://github.com/megacorp/widgets/pull/12",
+          isDraft: false,
+          updatedAt: new Date().toISOString(),
+        },
+      ]) as any,
+    );
+
+    await pollAll(makeConfig("acme"));
+
+    // Only the search itself ran — no fetchPRView/checks/reviews for the
+    // out-of-org PR, and it never entered the cache.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(readCache(TMP)).toHaveLength(0);
+    expect(mockedRoute).not.toHaveBeenCalled();
+  });
+
+  it("drains a cached out-of-org PR silently instead of polling it forever", async () => {
+    upsertCachedPR(TMP, cachedPR("megacorp/widgets"));
+
+    mockedExec.mockReturnValueOnce("[]" as any); // scoped search — nothing
+
+    await pollAll(makeConfig("acme"));
+
+    // Removed from cache without fetching its live state or notifying.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(readCache(TMP)).toHaveLength(0);
+    expect(mockedRoute).not.toHaveBeenCalled();
+  });
+
+  it("still reconciles in-org cached PRs when org is set", async () => {
+    upsertCachedPR(TMP, cachedPR("acme/widgets"));
+
+    mockedExec
+      .mockReturnValueOnce("[]" as any) // scoped search — nothing open anymore
+      .mockReturnValueOnce(
+        JSON.stringify({ number: 12, state: "MERGED", headRefOid: "abc123" }) as any,
+      ); // fetchPRView for the cached in-org PR
+
+    await pollAll(makeConfig("acme"));
+
+    expect(readCache(TMP)).toHaveLength(0);
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    expect(mockedRoute.mock.calls[0][1]).toContain("Merged");
   });
 });
 

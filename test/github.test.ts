@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments } from "../src/github.js";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments, belongsToOrg } from "../src/github.js";
 import type { IssueComment } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
@@ -56,6 +56,29 @@ describe("selectNewComments", () => {
 });
 
 describe("github", () => {
+  describe("belongsToOrg", () => {
+    it("matches repos in the configured org", () => {
+      expect(belongsToOrg("acme/widgets", "acme")).toBe(true);
+    });
+
+    it("rejects repos in other orgs", () => {
+      expect(belongsToOrg("megacorp/widgets", "acme")).toBe(false);
+    });
+
+    it("is case-insensitive on the owner", () => {
+      expect(belongsToOrg("ACME/widgets", "acme")).toBe(true);
+    });
+
+    it("does not match an org that is only a prefix of the owner", () => {
+      expect(belongsToOrg("acme-fork/widgets", "acme")).toBe(false);
+    });
+
+    it("matches everything when org is null or undefined", () => {
+      expect(belongsToOrg("megacorp/widgets", null)).toBe(true);
+      expect(belongsToOrg("megacorp/widgets", undefined)).toBe(true);
+    });
+  });
+
   describe("parseChecks", () => {
     it("parses raw checks into typed structures", () => {
       const raw = loadFixture<Array<{ name: string; state: string; bucket: string; workflow: string }>>(

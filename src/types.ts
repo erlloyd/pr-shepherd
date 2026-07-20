@@ -150,6 +150,7 @@ export type ShepherdConfig = {
   github: {
     defaultRepo: string | null;
     authorUsername: string | null;
+    org: string | null;
     ignoreRepos: string[];
   };
 

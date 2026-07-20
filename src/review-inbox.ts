@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { sendToAgent } from "./notifications.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
-import { fetchCommentsByUsers } from "./github.js";
+import { fetchCommentsByUsers, belongsToOrg } from "./github.js";
 import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
 
@@ -142,21 +142,19 @@ function botAutoApproved(number: number, repo: string, botUsername: string): boo
   return /###\s*✅\s*Auto-approved/i.test(latest.body);
 }
 
-export function fetchReviewRequests(githubUser: string): RawSearchResult[] {
-  const json = execFileSync(
-    "gh",
-    [
-      "search",
-      "prs",
-      `--review-requested=${githubUser}`,
-      "--state=open",
-      "--json",
-      "number,repository,title,url,isDraft,updatedAt",
-      "--limit",
-      "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+export function fetchReviewRequests(githubUser: string, org?: string | null): RawSearchResult[] {
+  const args = [
+    "search",
+    "prs",
+    `--review-requested=${githubUser}`,
+    "--state=open",
+    "--json",
+    "number,repository,title,url,isDraft,updatedAt",
+    "--limit",
+    "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as RawSearchResult[];
 }
 
@@ -166,7 +164,10 @@ export async function pollReviewInbox(
   if (!config.reviewInbox.enabled || !config.reviewInbox.githubUser) return null;
 
   try {
-    const results = fetchReviewRequests(config.reviewInbox.githubUser);
+    const org = config.github.org;
+    const results = fetchReviewRequests(config.reviewInbox.githubUser, org).filter((pr) =>
+      belongsToOrg(pr.repository.nameWithOwner, org),
+    );
     const inbox = readInbox(config.dataDir);
     const byKey = new Map(inbox.map((a) => [inboxKey(a.number, a.repo), a]));
     const username = config.reviewInbox.githubUser;
@@ -258,6 +259,7 @@ export async function pollReviewInbox(
 
     // Process each tracked assignment
     for (const assignment of inbox) {
+      if (!belongsToOrg(assignment.repo, org)) continue;
       if (assignment.status === "review_submitted" ||
           assignment.status === "merged_before_review" ||
           assignment.status === "closed") {
