@@ -31,7 +31,7 @@ import {
   formatMergeQueueEnteredMessage,
   formatMergeQueueLeftMessage,
 } from "./notifications.js";
-import type { ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
+import type { ApprovalFeedback, ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
 
 const log = createLogger("daemon");
 
@@ -132,7 +132,8 @@ async function handleTransition(
       }
       case "APPROVED": {
         const approvals = (details.approvals as number) ?? 0;
-        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge);
+        const approvalBodies = (details.approvalBodies as ApprovalFeedback[]) ?? [];
+        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge, approvalBodies);
         if (config.autoMerge) {
           log.info(`Enabling auto-merge for PR #${pr.number}`);
           if (!config.dryRun) {
@@ -397,7 +398,10 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       if (fetchMergeQueueStatus(pr.number, pr.repo)) {
         if (pr.state === "AWAITING_REVIEW" || pr.state === "STALE") {
           const reviewResult = evaluateReviews(reviews, config);
-          const details = { approvals: reviewResult.approvals };
+          const details = {
+            approvals: reviewResult.approvals,
+            approvalBodies: reviewResult.approvalBodies,
+          };
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
         }
@@ -442,11 +446,22 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         tryTransition(config, pr, "changes_requested", details);
         await handleTransition(config, pr, "CHANGES_REQUESTED", details);
       } else if (reviewResult.status === "approved") {
+        const details = {
+          approvals: reviewResult.approvals,
+          approvalBodies: reviewResult.approvalBodies,
+        };
         if (prView.autoMergeRequest) {
-          tryTransition(config, pr, "all_approved", { approvals: reviewResult.approvals });
+          tryTransition(config, pr, "all_approved", details);
           tryTransition(config, pr, "auto_merge_enabled");
+          // Auto-merge is already on, so the usual APPROVED handling is
+          // skipped — but an approval that carries feedback (e.g. a bot
+          // approving with warnings) must still reach the agent. This runs
+          // only on the poll that consumes the state change out of
+          // CI_PASSED/AWAITING_REVIEW/STALE, so it fires once.
+          if (reviewResult.approvalBodies.length > 0) {
+            await handleTransition(config, pr, "APPROVED", details);
+          }
         } else {
-          const details = { approvals: reviewResult.approvals };
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
         }

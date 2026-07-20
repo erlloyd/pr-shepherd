@@ -68,6 +68,11 @@ export type CheckStatus = {
   workflow: string;
 };
 
+export type ApprovalFeedback = {
+  reviewer: string;
+  body: string;
+};
+
 export type ReviewData = {
   author: string;
   state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";

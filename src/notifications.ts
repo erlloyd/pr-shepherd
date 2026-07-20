@@ -1,5 +1,5 @@
 import { routeToAgent } from "./ateam-conductor.js";
-import type { ShepherdConfig } from "./types.js";
+import type { ApprovalFeedback, ShepherdConfig } from "./types.js";
 
 export async function sendToAgent(
   config: ShepherdConfig,
@@ -106,9 +106,16 @@ export function formatApprovalMessage(
   repo: string,
   approvals: number,
   autoMerge: boolean,
+  approvalBodies: ApprovalFeedback[] = [],
 ): string {
   const head = `[PR Shepherd] PR #${prNumber} (${repo}) — Approved (${approvals} approval${approvals !== 1 ? "s" : ""}).`;
-  return autoMerge
+  const msg = autoMerge
     ? `${head} Enabling auto-merge.`
     : `🚩 ${head} Ready to merge — auto-merge is disabled, so merge it yourself when you're ready.`;
+  if (approvalBodies.length === 0) return msg;
+
+  const feedback = approvalBodies
+    .map((r) => `**${r.reviewer}** (approved with feedback):\n${r.body}`)
+    .join("\n\n---\n\n");
+  return `${msg}\n\nHowever, reviewers left feedback that should still be addressed:\n\n${feedback}`;
 }
