@@ -222,6 +222,57 @@ describe("github", () => {
       const result = evaluateReviews([], config);
       expect(result.status).toBe("approved");
     });
+
+    it("collects approvalBodies for approvals with substantive bodies (>20 chars)", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved, but the retry loop swallows timeout errors.", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "alice", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([
+        { reviewer: "canary", body: "Approved, but the retry loop swallows timeout errors." },
+      ]);
+    });
+
+    it("ignores whitespace-padded trivial approval bodies", () => {
+      const reviews: ReviewData[] = [
+        { author: "alice", state: "APPROVED", body: "   LGTM   \n\n          ", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("only considers the latest review per author for approvalBodies", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Older approval with a long substantive body.", submittedAt: "2026-06-15T18:00:00Z" },
+        { author: "canary", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("returns empty approvalBodies when changes are requested", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "bob", state: "CHANGES_REQUESTED", body: "No", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("changes_requested");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("returns empty approvalBodies while approvals are below threshold", () => {
+      const config = makeConfig({ requiredApprovals: 2 });
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, config);
+      expect(result.status).toBe("pending");
+      expect(result.approvalBodies).toEqual([]);
+    });
   });
 
   describe("buildSnapshot", () => {
