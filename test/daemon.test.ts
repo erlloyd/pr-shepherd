@@ -123,6 +123,7 @@ describe("pollAll — reconciling PRs that dropped out of the open set", () => {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
       ...overrides,
     };
   }
@@ -191,6 +192,146 @@ describe("pollAll — reconciling PRs that dropped out of the open set", () => {
   });
 });
 
+describe("pollAll — merge-conflict escalation dedup", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_conflict");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedRoute: ReturnType<typeof vi.mocked<any>>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { routeToAgent } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedRoute = vi.mocked(routeToAgent);
+    mockedExec.mockReset();
+    mockedRoute.mockReset();
+  });
+
+  afterEach(() => rmSync(TMP, { recursive: true, force: true }));
+
+  function makeConfig(overrides?: Partial<ShepherdConfig>): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      github: { defaultRepo: null, authorUsername: "erlloyd", ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+      ...overrides,
+    };
+  }
+
+  function cachedPR(overrides?: Partial<WatchedPR>): WatchedPR {
+    return {
+      number: 42,
+      repo: "acme/widgets",
+      title: "feat: conflicted",
+      url: "https://github.com/acme/widgets/pull/42",
+      state: "AUTO_MERGE_ENABLED",
+      headSha: "abc123",
+      lastCheckedAt: "2026-07-18T10:00:00.000Z",
+      lastEventAt: "2026-07-18T10:00:00.000Z",
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
+      ...overrides,
+    };
+  }
+
+  function mockOnePoll(prView: Record<string, unknown>, checks = "[]") {
+    mockedExec
+      .mockReturnValueOnce(
+        JSON.stringify([
+          {
+            number: 42,
+            repository: { name: "widgets", nameWithOwner: "acme/widgets" },
+            title: "feat: conflicted",
+            url: "https://github.com/acme/widgets/pull/42",
+            isDraft: false,
+            updatedAt: new Date().toISOString(),
+          },
+        ]) as any,
+      ) // discoverAuthoredPRs
+      .mockReturnValueOnce(
+        JSON.stringify({
+          number: 42,
+          state: "OPEN",
+          reviewDecision: null,
+          mergedAt: null,
+          closedAt: null,
+          headRefOid: "abc123",
+          autoMergeRequest: null,
+          ...prView,
+        }) as any,
+      ) // fetchPRView
+      .mockReturnValueOnce(checks as any) // fetchChecks
+      .mockReturnValueOnce(JSON.stringify({ reviews: [] }) as any); // fetchReviews
+  }
+
+  it("escalates a conflict once, not on every poll", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR());
+
+    mockOnePoll({ mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" });
+    mockOnePoll({ mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" });
+
+    await pollAll(config);
+    await pollAll(config);
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    expect(mockedRoute.mock.calls[0][1]).toContain("Merge conflicts");
+    const cached = readCache(TMP);
+    expect(cached[0].lastConflictNotifiedAt).toBeTruthy();
+  });
+
+  it("resets the marker when the conflict clears, so a later conflict notifies again", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR({ lastConflictNotifiedAt: "2026-07-18T10:00:00.000Z" }));
+
+    mockOnePoll({ mergeStateStatus: "CLEAN", mergeable: "MERGEABLE" });
+    await pollAll(config);
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    expect(readCache(TMP)[0].lastConflictNotifiedAt).toBeNull();
+
+    mockOnePoll({ mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" });
+    await pollAll(config);
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    expect(mockedRoute.mock.calls[0][1]).toContain("Merge conflicts");
+  });
+
+  it("escalates a conflict outside AUTO_MERGE_ENABLED/BEHIND (e.g. during CI_PENDING)", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR({ state: "CI_PENDING" }));
+
+    mockOnePoll(
+      { mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" },
+      JSON.stringify([
+        { name: "build", state: "IN_PROGRESS", bucket: "pending", workflow: "CI" },
+      ]),
+    );
+    await pollAll(config);
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    expect(mockedRoute.mock.calls[0][1]).toContain("Merge conflicts");
+    expect(readCache(TMP)[0].state).toBe("CI_PENDING");
+  });
+
+  it("dry-run neither notifies nor consumes the marker", async () => {
+    const config = makeConfig({ dryRun: true });
+    upsertCachedPR(TMP, cachedPR());
+
+    mockOnePoll({ mergeStateStatus: "DIRTY", mergeable: "CONFLICTING" });
+    await pollAll(config);
+
+    expect(mockedRoute).not.toHaveBeenCalled();
+    expect(readCache(TMP)[0].lastConflictNotifiedAt).toBeNull();
+  });
+});
+
 describe("pollAll — merge queue entered from AWAITING_REVIEW (manual override)", () => {
   const TMP = join(import.meta.dirname, "__tmp_daemon_mergequeue");
 
@@ -236,6 +377,7 @@ describe("pollAll — merge queue entered from AWAITING_REVIEW (manual override)
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
   }
 

@@ -344,6 +344,7 @@ describe("pollReplyWatch", () => {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
     writeCache(TMP_RW, [watched]);
     const { writeFileSync } = await import("node:fs");
@@ -386,6 +387,7 @@ describe("pollReplyWatch", () => {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
     writeCache(TMP_RW, [watched]);
     const { writeFileSync } = await import("node:fs");
@@ -425,6 +427,7 @@ describe("pollReplyWatch", () => {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
     writeCache(TMP_RW, [watched]);
     const { writeFileSync } = await import("node:fs");

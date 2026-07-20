@@ -319,6 +319,21 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       upsertCachedPR(config.dataDir, pr);
     }
 
+    if (prView.mergeable === "CONFLICTING") {
+      if (!pr.lastConflictNotifiedAt) {
+        const msg = `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Merge conflicts detected. The branch cannot be merged or updated automatically. Please resolve conflicts manually.`;
+        log.info(`PR #${pr.number} has merge conflicts — escalating.`);
+        if (!config.dryRun) {
+          await sendToAgent(config, config.notifications.notifyAgent!, msg);
+          pr.lastConflictNotifiedAt = now();
+          upsertCachedPR(config.dataDir, pr);
+        }
+      }
+    } else if (pr.lastConflictNotifiedAt) {
+      pr.lastConflictNotifiedAt = null;
+      upsertCachedPR(config.dataDir, pr);
+    }
+
     if (pr.state === "CI_PENDING") {
       if (prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
         log.info(`PR #${pr.number} is behind base branch while CI is running — updating branch now (CI will restart).`);
@@ -354,21 +369,15 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         await handleTransition(config, pr, "CI_FAILED", details);
       }
 
-      if (prView.mergeStateStatus === "BEHIND") {
-        if (prView.mergeable === "MERGEABLE") {
-          log.info(`PR #${pr.number} is behind base branch — updating branch.`);
-          if (!config.dryRun) {
-            try {
-              updateBranch(pr.number, pr.repo);
-              log.info(`Branch updated for PR #${pr.number}.`);
-            } catch (err) {
-              log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
-            }
+      if (prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
+        log.info(`PR #${pr.number} is behind base branch — updating branch.`);
+        if (!config.dryRun) {
+          try {
+            updateBranch(pr.number, pr.repo);
+            log.info(`Branch updated for PR #${pr.number}.`);
+          } catch (err) {
+            log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
           }
-        } else if (prView.mergeable === "CONFLICTING") {
-          const msg = `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Merge conflicts detected. Auto-merge is enabled but the branch cannot be updated automatically. Please resolve conflicts manually.`;
-          log.info(`PR #${pr.number} has merge conflicts — escalating.`);
-          if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
         }
       }
     }
@@ -500,6 +509,7 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
 
     await pollPR(config, pr);

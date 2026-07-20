@@ -13,7 +13,7 @@ A single long-running Node.js process with two polling loops on a shared interva
    - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
    - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
    - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges.
-   - **Auto-merge enabled but merge conflicts** → escalates to the agent (cannot auto-resolve)
+   - **Merge conflicts** → escalates to the agent once per conflict, in any watched state (deduped via `lastConflictNotifiedAt`; reset when the conflict clears)
    - **Entered merge queue** (if `mergeQueue.enabled`) → sends an informational notice, no action needed
    - **Left merge queue without merging** → escalates to the agent (usually means the queue's CI check failed)
    - **PR stale** (awaiting review past threshold) → notifies the agent
@@ -62,7 +62,7 @@ Key loops:
 - **CI failure**: `CI_PENDING → CI_FAILED` → agent notified → worker pushes fix → `CI_PENDING` (new commit detected)
 - **Changes requested**: `AWAITING_REVIEW → CHANGES_REQUESTED` → agent notified → worker pushes fix → `CI_PENDING`
 - **Behind branch**: `AUTO_MERGE_ENABLED` + `BEHIND` → `gh pr update-branch` → CI re-runs → stays in `AUTO_MERGE_ENABLED` until merged
-- **Merge conflicts**: `AUTO_MERGE_ENABLED` + `CONFLICTING` → escalated to agent
+- **Merge conflicts**: `CONFLICTING` in any watched state → escalated to agent once (re-armed when the conflict clears)
 - **Merge queue** (opt-in via `mergeQueue.enabled`): `AUTO_MERGE_ENABLED → IN_MERGE_QUEUE` on entry (informational) → `MERGED` on merge, or `left_queue → AUTO_MERGE_ENABLED` with an escalation if dequeued without merging
 - **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → agent notified
 
