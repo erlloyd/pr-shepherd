@@ -12,7 +12,8 @@ A single long-running Node.js process with two polling loops on a shared interva
    - **Bot review feedback** → for each user in `reviews.botUsers`, scans PR issue comments for actionable findings (`❌`) and forwards them to the agent. Capped at `botFeedback.maxAttempts` per PR.
    - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
    - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
-   - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges.
+   - **Approved with feedback** → approval review bodies over 20 chars (e.g. a bot approving while listing warnings) are relayed to the agent alongside the approval, including when auto-merge is already enabled
+   - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges. Skipped when `mergeQueue.enabled` — the queue rebases queued PRs itself.
    - **Merge conflicts** → escalates to the agent once per conflict, in any watched state (deduped via `lastConflictNotifiedAt`; reset when the conflict clears)
    - **Entered merge queue** (if `mergeQueue.enabled`) → sends an informational notice, no action needed
    - **Left merge queue without merging** → escalates to the agent (usually means the queue's CI check failed)
@@ -105,7 +106,7 @@ at `warn` level instead of `info`.
 ## Tests
 
 ```bash
-npm test            # 198 tests across 10 files
+npm test            # 257 tests across 11 files
 npm run typecheck   # Clean TypeScript check
 ```
 
