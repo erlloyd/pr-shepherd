@@ -210,6 +210,33 @@ describe("pollReviewInbox dry-run", () => {
     expect(persisted[0].notifiedAt).toBeNull();
     expect(persisted[0].status).toBe("dispatched");
   });
+
+  it("leaves notifiedAt null when routeToAgent fails, so the next poll retries", async () => {
+    const assignment: ReviewAssignment = {
+      number: 3511,
+      repo: "acme/widgets",
+      title: "feat: test dispatch retry",
+      url: "https://github.com/acme/widgets/pull/3511",
+      detectedAt: new Date().toISOString(),
+      notifiedAt: null,
+      completedAt: null,
+      status: "dispatched",
+    };
+    writeInbox(TMP_POLL, [assignment]);
+
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>) // getPRState
+      .mockReturnValueOnce(JSON.stringify({ reviews: [] }) as unknown as ReturnType<typeof execFileSync>); // hasUserReviewed
+    mockedRoute.mockReturnValueOnce(false);
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_POLL, dryRun: false }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const persisted = readInbox(TMP_POLL);
+    expect(persisted[0].notifiedAt).toBeNull();
+    expect(persisted[0].status).toBe("dispatched");
+  });
 });
 
 describe("re-review on re-request", () => {

@@ -368,21 +368,24 @@ export async function pollReviewInbox(
             log.info(`[dry-run] would dispatch review of PR #${assignment.number} (${assignment.repo}) to ateam — skipping (notifiedAt NOT persisted)`);
           } else {
             log.debug(`dispatching review of PR #${assignment.number} (${assignment.repo}) to ateam`);
-            routeToAgent(config, msg, { reviewRequest: true });
-            assignment.notifiedAt = new Date().toISOString();
-            updated = true;
+            if (routeToAgent(config, msg, { reviewRequest: true })) {
+              assignment.notifiedAt = new Date().toISOString();
+              updated = true;
 
-            log.info(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
+              log.info(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
 
-            appendEvent(config.dataDir, {
-              ts: assignment.notifiedAt,
-              pr: assignment.number,
-              repo: assignment.repo,
-              event: "review_requested",
-              from: "OPENED",
-              to: "OPENED",
-              details: { type: "review_inbox", title: assignment.title, url: assignment.url },
-            });
+              appendEvent(config.dataDir, {
+                ts: assignment.notifiedAt,
+                pr: assignment.number,
+                repo: assignment.repo,
+                event: "review_requested",
+                from: "OPENED",
+                to: "OPENED",
+                details: { type: "review_inbox", title: assignment.title, url: assignment.url },
+              });
+            } else {
+              log.info(`Dispatch failed for PR #${assignment.number} (${assignment.repo}) — will retry next poll`);
+            }
           }
         }
 
