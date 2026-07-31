@@ -3,6 +3,7 @@ import {
   readInbox,
   writeInbox,
   formatReviewAssignmentMessage,
+  formatReReviewMessage,
   pollReviewInbox,
   fetchReviewRequests,
   latestUserReviewAt,
@@ -70,6 +71,51 @@ describe("review-inbox", () => {
       expect(msg).toContain("feat: add widget sorting");
       expect(msg).toContain("https://github.com/acme/widgets/pull/42");
       expect(msg).toContain("dispatch a worker");
+    });
+  });
+
+  describe("formatReReviewMessage", () => {
+    it("formats a re-review notification", () => {
+      const msg = formatReReviewMessage(makeAssignment());
+
+      expect(msg).toContain("[PR Shepherd] Re-review requested");
+      expect(msg).toContain("PR #42");
+      expect(msg).toContain("acme/widgets");
+      expect(msg).toContain("https://github.com/acme/widgets/pull/42");
+      expect(msg).toContain("previously reviewed this PR");
+    });
+
+    // These two guard a silent-failure mode, so read before relaxing them.
+    //
+    // A re-review wakes an ALREADY-RUNNING session by mail. The
+    // /agent-teams:review-pr skill prompt is delivered separately and arrives
+    // later — measured at 11s later in one case. Anything actionable in this
+    // message therefore runs with none of the skill's rules loaded, including
+    // the rule that approves a re-review whose findings are all addressed.
+    // That is exactly how re-reviews shipped as COMMENT when they had cleared
+    // every finding.
+    //
+    // So the message must name the skill and must NOT be executable on its own.
+    // Nothing else in this repo can catch a regression here: the symptom is a
+    // wrong review verdict on GitHub days later, with every test still green.
+    it("redirects to the review-pr skill instead of describing the task", () => {
+      const msg = formatReReviewMessage(makeAssignment());
+
+      expect(msg).toContain("/agent-teams:review-pr");
+      // The session must be able to resolve its own initiative id: pr-shepherd
+      // never learns it (ateam resolves the match downstream of this message).
+      expect(msg).toContain("ateam resume-match");
+    });
+
+    it("gives the woken session no self-sufficient instruction to post a review", () => {
+      const msg = formatReReviewMessage(makeAssignment()).toLowerCase();
+
+      // The exact clause this fix removed, plus near-miss rewordings of it.
+      expect(msg).not.toContain("post a short follow-up review");
+      expect(msg).not.toContain("post a follow-up review");
+      expect(msg).not.toMatch(/\bpost a review with\b/);
+      // Any surviving mention of posting must be a prohibition, never an order.
+      expect(msg).toContain("do not post a review");
     });
   });
 
