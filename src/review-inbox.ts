@@ -472,7 +472,17 @@ function formatReReviewMessage(assignment: ReviewAssignment): string {
     assignment.url,
     "",
     "You previously reviewed this PR. The author has addressed the findings and re-requested review.",
-    "Verify each previously raised finding was addressed by the new commits and post a short follow-up review with the outcome per finding. Do not raise new findings.",
+    // This redirect IS the fix — do not "simplify" it away, and do not replace it
+    // with the review instructions it points at. A woken session receives this
+    // message before the /agent-teams:review-pr skill prompt arrives, so anything
+    // actionable here gets executed with none of the skill's rules in context —
+    // including the one that approves a re-review whose findings are all
+    // addressed. Naming the skill instead of the task is what closes that window.
+    // Deleting these lines restores the defect silently: no test elsewhere fails,
+    // and the only symptom is re-reviews posting as COMMENT when they should
+    // APPROVE. Shorten the lines above this one instead.
+    "Do not act on this request yourself, and do not post a review yet.",
+    'Resolve this initiative with `ateam resume-match "$PWD"`, then run `/agent-teams:review-pr <that-id>` and follow it — that skill owns how a re-review is verified and posted, including whether to approve.',
   ].join("\n");
 }
 
