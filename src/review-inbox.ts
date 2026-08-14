@@ -473,6 +473,7 @@ function formatReReviewMessage(assignment: ReviewAssignment): string {
     "",
     "You previously reviewed this PR. The author has addressed the findings and re-requested review.",
     "Verify each previously raised finding was addressed by the new commits and post a short follow-up review with the outcome per finding. Do not raise new findings.",
+    "If every prior finding is addressed, approve the PR (unless it is your own — then comment instead).",
   ].join("\n");
 }
 
