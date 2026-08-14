@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { CheckStatus, ReviewData, PRSnapshot, ShepherdConfig } from "./types.js";
+import type { ApprovalFeedback, CheckStatus, ReviewData, PRSnapshot, ShepherdConfig } from "./types.js";
 
 type RawCheck = {
   name: string;
@@ -32,6 +32,15 @@ function gh(args: string[]): string {
     encoding: "utf-8",
     timeout: 30_000,
   }).trim();
+}
+
+// Defensive re-filter behind the `--owner` search qualifier — gh search
+// qualifiers can be lossy. A null/unset org matches everything, preserving
+// pre-scoping behavior.
+export function belongsToOrg(nameWithOwner: string, org: string | null | undefined): boolean {
+  if (!org) return true;
+  const owner = nameWithOwner.split("/")[0] ?? "";
+  return owner.toLowerCase() === org.toLowerCase();
 }
 
 export function fetchPRView(number: number, repo: string): RawPRView {
@@ -337,6 +346,7 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   status: "approved" | "changes_requested" | "pending";
   approvals: number;
   changesRequested: ReviewData[];
+  approvalBodies: ApprovalFeedback[];
 } {
   const latestByAuthor = new Map<string, ReviewData>();
   for (const review of reviews) {
@@ -347,18 +357,22 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   }
 
   const latest = [...latestByAuthor.values()];
-  const approvals = latest.filter((r) => r.state === "APPROVED").length;
+  const approved = latest.filter((r) => r.state === "APPROVED");
+  const approvals = approved.length;
   const changesRequested = latest.filter(
     (r) => r.state === "CHANGES_REQUESTED",
   );
+  const approvalBodies = approved
+    .filter((r) => r.body.trim().length > 20)
+    .map((r) => ({ reviewer: r.author, body: r.body }));
 
   if (changesRequested.length > 0) {
-    return { status: "changes_requested", approvals, changesRequested };
+    return { status: "changes_requested", approvals, changesRequested, approvalBodies: [] };
   }
   if (approvals >= config.requiredApprovals) {
-    return { status: "approved", approvals, changesRequested: [] };
+    return { status: "approved", approvals, changesRequested: [], approvalBodies };
   }
-  return { status: "pending", approvals, changesRequested: [] };
+  return { status: "pending", approvals, changesRequested: [], approvalBodies: [] };
 }
 
 export function buildSnapshot(

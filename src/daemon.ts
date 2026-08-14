@@ -12,6 +12,7 @@ import {
   fetchCommentsByUsers,
   selectNewComments,
   fetchMergeQueueStatus,
+  belongsToOrg,
 } from "./github.js";
 import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-cache.js";
 import { appendEvent } from "./events.js";
@@ -31,7 +32,7 @@ import {
   formatMergeQueueEnteredMessage,
   formatMergeQueueLeftMessage,
 } from "./notifications.js";
-import type { ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
+import type { ApprovalFeedback, ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
 
 const log = createLogger("daemon");
 
@@ -85,25 +86,32 @@ function tryTransition(
   return next;
 }
 
-export function filterAuthoredPRs(prs: RawSearchResult[], ignoreRepos: string[]): RawSearchResult[] {
-  return prs.filter((pr) => !pr.isDraft && !ignoreRepos.includes(pr.repository.nameWithOwner));
+export function filterAuthoredPRs(
+  prs: RawSearchResult[],
+  ignoreRepos: string[],
+  org: string | null = null,
+): RawSearchResult[] {
+  return prs.filter(
+    (pr) =>
+      !pr.isDraft &&
+      !ignoreRepos.includes(pr.repository.nameWithOwner) &&
+      belongsToOrg(pr.repository.nameWithOwner, org),
+  );
 }
 
-export function discoverAuthoredPRs(username: string): RawSearchResult[] {
-  const json = execFileSync(
-    "gh",
-    [
-      "search",
-      "prs",
-      `--author=${username}`,
-      "--state=open",
-      "--json",
-      "number,repository,title,url,isDraft,updatedAt",
-      "--limit",
-      "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+export function discoverAuthoredPRs(username: string, org?: string | null): RawSearchResult[] {
+  const args = [
+    "search",
+    "prs",
+    `--author=${username}`,
+    "--state=open",
+    "--json",
+    "number,repository,title,url,isDraft,updatedAt",
+    "--limit",
+    "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as RawSearchResult[];
 }
 
@@ -132,7 +140,8 @@ async function handleTransition(
       }
       case "APPROVED": {
         const approvals = (details.approvals as number) ?? 0;
-        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge);
+        const approvalBodies = (details.approvalBodies as ApprovalFeedback[]) ?? [];
+        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge, approvalBodies);
         if (config.autoMerge) {
           log.info(`Enabling auto-merge for PR #${pr.number}`);
           if (!config.dryRun) {
@@ -319,8 +328,23 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       upsertCachedPR(config.dataDir, pr);
     }
 
+    if (prView.mergeable === "CONFLICTING") {
+      if (!pr.lastConflictNotifiedAt) {
+        const msg = `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Merge conflicts detected. The branch cannot be merged or updated automatically. Please resolve conflicts manually.`;
+        log.info(`PR #${pr.number} has merge conflicts — escalating.`);
+        if (!config.dryRun) {
+          await sendToAgent(config, config.notifications.notifyAgent!, msg);
+          pr.lastConflictNotifiedAt = now();
+          upsertCachedPR(config.dataDir, pr);
+        }
+      }
+    } else if (pr.lastConflictNotifiedAt) {
+      pr.lastConflictNotifiedAt = null;
+      upsertCachedPR(config.dataDir, pr);
+    }
+
     if (pr.state === "CI_PENDING") {
-      if (prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
+      if (!config.mergeQueue.enabled && prView.autoMergeRequest && prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
         log.info(`PR #${pr.number} is behind base branch while CI is running — updating branch now (CI will restart).`);
         if (!config.dryRun) {
           try {
@@ -354,8 +378,10 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         await handleTransition(config, pr, "CI_FAILED", details);
       }
 
-      if (prView.mergeStateStatus === "BEHIND") {
-        if (prView.mergeable === "MERGEABLE") {
+      if (prView.mergeStateStatus === "BEHIND" && prView.mergeable === "MERGEABLE") {
+        if (config.mergeQueue.enabled) {
+          log.debug(`PR #${pr.number} is behind base branch — merge queue handles rebasing, skipping update-branch.`);
+        } else {
           log.info(`PR #${pr.number} is behind base branch — updating branch.`);
           if (!config.dryRun) {
             try {
@@ -365,10 +391,6 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
               log.error(`Failed to update branch for PR #${pr.number}: ${(err as Error).message}`);
             }
           }
-        } else if (prView.mergeable === "CONFLICTING") {
-          const msg = `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Merge conflicts detected. Auto-merge is enabled but the branch cannot be updated automatically. Please resolve conflicts manually.`;
-          log.info(`PR #${pr.number} has merge conflicts — escalating.`);
-          if (!config.dryRun) await sendToAgent(config, config.notifications.notifyAgent!, msg);
         }
       }
     }
@@ -384,7 +406,10 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       if (fetchMergeQueueStatus(pr.number, pr.repo)) {
         if (pr.state === "AWAITING_REVIEW" || pr.state === "STALE") {
           const reviewResult = evaluateReviews(reviews, config);
-          const details = { approvals: reviewResult.approvals };
+          const details = {
+            approvals: reviewResult.approvals,
+            approvalBodies: reviewResult.approvalBodies,
+          };
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
         }
@@ -429,11 +454,22 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         tryTransition(config, pr, "changes_requested", details);
         await handleTransition(config, pr, "CHANGES_REQUESTED", details);
       } else if (reviewResult.status === "approved") {
+        const details = {
+          approvals: reviewResult.approvals,
+          approvalBodies: reviewResult.approvalBodies,
+        };
         if (prView.autoMergeRequest) {
-          tryTransition(config, pr, "all_approved", { approvals: reviewResult.approvals });
+          tryTransition(config, pr, "all_approved", details);
           tryTransition(config, pr, "auto_merge_enabled");
+          // Auto-merge is already on, so the usual APPROVED handling is
+          // skipped — but an approval that carries feedback (e.g. a bot
+          // approving with warnings) must still reach the agent. This runs
+          // only on the poll that consumes the state change out of
+          // CI_PASSED/AWAITING_REVIEW/STALE, so it fires once.
+          if (reviewResult.approvalBodies.length > 0) {
+            await handleTransition(config, pr, "APPROVED", details);
+          }
         } else {
-          const details = { approvals: reviewResult.approvals };
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
         }
@@ -472,17 +508,18 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
 
 export async function pollAll(config: ShepherdConfig): Promise<number> {
   const username = config.github.authorUsername!;
+  const org = config.github.org;
   log.debug(`Discovering open PRs by @${username}...`);
 
   let discovered: RawSearchResult[];
   try {
-    discovered = discoverAuthoredPRs(username);
+    discovered = discoverAuthoredPRs(username, org);
   } catch (err) {
     log.error(`Error discovering PRs: ${(err as Error).message}`);
     return 0;
   }
 
-  const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos);
+  const openPRs = filterAuthoredPRs(discovered, config.github.ignoreRepos, org);
   log.debug(`Found ${openPRs.length} open non-draft PR(s).`);
 
   for (const raw of openPRs) {
@@ -500,6 +537,7 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastConflictNotifiedAt: null,
     };
 
     await pollPR(config, pr);
@@ -516,6 +554,15 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
   for (const pr of cached) {
     const key = `${pr.repo}#${pr.number}`;
     if (openKeys.has(key) || isTerminal(pr.state)) continue;
+
+    // A cached PR outside the configured org can never reappear in the scoped
+    // search, so the merged/closed reconciliation below would re-poll it every
+    // cycle forever — drain it from the cache silently instead.
+    if (!belongsToOrg(pr.repo, org)) {
+      log.info(`PR #${pr.number} (${pr.repo}) is outside configured org "${org}" — removing from cache.`);
+      removeCachedPR(config.dataDir, pr.number, pr.repo);
+      continue;
+    }
 
     try {
       const prView = fetchPRView(pr.number, pr.repo);

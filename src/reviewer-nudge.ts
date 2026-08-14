@@ -6,6 +6,7 @@ import {
   postComment,
   fetchPRView,
   hasReviewerRespondedSince,
+  belongsToOrg,
 } from "./github.js";
 import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewerNudge, PREventRecord } from "./types.js";
@@ -119,6 +120,7 @@ export async function pollReviewerNudges(config: ShepherdConfig): Promise<number
   let updated = false;
 
   for (const nudge of nudges) {
+    if (!belongsToOrg(nudge.repo, config.github.org)) continue;
     if (nudge.status === "responded" || nudge.status === "closed") continue;
 
     try {

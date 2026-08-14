@@ -14,6 +14,7 @@ const DEFAULTS: ShepherdConfig = {
   github: {
     defaultRepo: null,
     authorUsername: null,
+    org: null,
     ignoreRepos: [],
   },
 
@@ -128,6 +129,8 @@ function applyEnvOverrides(config: ShepherdConfig): ShepherdConfig {
     config.github.defaultRepo = env.PR_SHEPHERD_DEFAULT_REPO;
   if (env.PR_SHEPHERD_AUTHOR_USERNAME)
     config.github.authorUsername = env.PR_SHEPHERD_AUTHOR_USERNAME;
+  if (env.PR_SHEPHERD_GITHUB_ORG)
+    config.github.org = env.PR_SHEPHERD_GITHUB_ORG;
   if (env.PR_SHEPHERD_NOTIFY_AGENT)
     config.notifications.notifyAgent = env.PR_SHEPHERD_NOTIFY_AGENT;
   if (env.PR_SHEPHERD_REVIEW_INBOX_USER)

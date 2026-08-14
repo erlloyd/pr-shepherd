@@ -4,6 +4,7 @@ import {
   writeInbox,
   formatReviewAssignmentMessage,
   pollReviewInbox,
+  fetchReviewRequests,
   latestUserReviewAt,
   isUserReviewRequested,
 } from "../src/review-inbox.js";
@@ -206,6 +207,33 @@ describe("pollReviewInbox dry-run", () => {
     // The inbox file must be unchanged — notifiedAt still null, status still dispatched
     const persisted = readInbox(TMP_POLL);
     expect(persisted).toHaveLength(1);
+    expect(persisted[0].notifiedAt).toBeNull();
+    expect(persisted[0].status).toBe("dispatched");
+  });
+
+  it("leaves notifiedAt null when routeToAgent fails, so the next poll retries", async () => {
+    const assignment: ReviewAssignment = {
+      number: 3511,
+      repo: "acme/widgets",
+      title: "feat: test dispatch retry",
+      url: "https://github.com/acme/widgets/pull/3511",
+      detectedAt: new Date().toISOString(),
+      notifiedAt: null,
+      completedAt: null,
+      status: "dispatched",
+    };
+    writeInbox(TMP_POLL, [assignment]);
+
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>) // fetchReviewRequests
+      .mockReturnValueOnce(JSON.stringify({ state: "OPEN" }) as unknown as ReturnType<typeof execFileSync>) // getPRState
+      .mockReturnValueOnce(JSON.stringify({ reviews: [] }) as unknown as ReturnType<typeof execFileSync>); // hasUserReviewed
+    mockedRoute.mockReturnValueOnce(false);
+
+    await pollReviewInbox(makePollConfig({ dataDir: TMP_POLL, dryRun: false }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const persisted = readInbox(TMP_POLL);
     expect(persisted[0].notifiedAt).toBeNull();
     expect(persisted[0].status).toBe("dispatched");
   });
@@ -520,5 +548,69 @@ describe("latestUserReviewAt", () => {
       }) as unknown as ReturnType<typeof execFileSync>,
     );
     expect(latestUserReviewAt(42, "acme/widgets", "testuser")).toBe("2026-07-11T00:00:00Z");
+  });
+});
+
+describe("org scoping", () => {
+  const TMP_ORG = join(import.meta.dirname, "__tmp_review_inbox_org");
+
+  beforeEach(() => {
+    mkdirSync(TMP_ORG, { recursive: true });
+    vi.clearAllMocks();
+    mockedRoute.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    rmSync(TMP_ORG, { recursive: true, force: true });
+  });
+
+  it("passes --owner to the review-requested search when org is set", () => {
+    mockedExec.mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>);
+    fetchReviewRequests("testuser", "acme");
+    expect(mockedExec.mock.calls[0][1]).toContain("--owner=acme");
+  });
+
+  it("omits --owner when org is unset", () => {
+    mockedExec.mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>);
+    fetchReviewRequests("testuser");
+    expect(
+      (mockedExec.mock.calls[0][1] as string[]).some((a) => a.startsWith("--owner")),
+    ).toBe(false);
+  });
+
+  it("drops out-of-org search results and skips out-of-org tracked assignments", async () => {
+    // A persisted assignment from before the org was configured
+    writeInbox(TMP_ORG, [
+      makeAssignment({ repo: "megacorp/widgets", notifiedAt: null, status: "dispatched" }),
+    ]);
+
+    // Search returns an out-of-org PR despite the --owner qualifier
+    mockedExec.mockReturnValueOnce(
+      JSON.stringify([
+        {
+          number: 77,
+          repository: { name: "widgets", nameWithOwner: "megacorp/widgets" },
+          title: "feat: out of org",
+          url: "https://github.com/megacorp/widgets/pull/77",
+          isDraft: false,
+          updatedAt: new Date().toISOString(),
+        },
+      ]) as unknown as ReturnType<typeof execFileSync>,
+    );
+
+    const config = makePollConfig({
+      dataDir: TMP_ORG,
+      dryRun: false,
+      github: { defaultRepo: null, authorUsername: null, org: "acme", ignoreRepos: [] },
+    } as Partial<ShepherdConfig>);
+    await pollReviewInbox(config);
+
+    // Only the search ran — no PR-state/review lookups for out-of-org entries,
+    // no dispatch, and the out-of-org search result was never added.
+    expect(mockedExec).toHaveBeenCalledTimes(1);
+    expect(mockedRoute).not.toHaveBeenCalled();
+    const persisted = readInbox(TMP_ORG);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].notifiedAt).toBeNull();
   });
 });

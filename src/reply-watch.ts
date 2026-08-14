@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { fetchReviewThreadComments } from "./github.js";
+import { fetchReviewThreadComments, belongsToOrg } from "./github.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
 import { readCache } from "./state-cache.js";
@@ -93,23 +93,21 @@ export function writeReplyWatch(dataDir: string, records: ReplyWatchRecord[]): v
   renameSync(tmp, path);
 }
 
-function fetchReviewedPRs(githubUser: string): Array<{
+function fetchReviewedPRs(githubUser: string, org?: string | null): Array<{
   number: number;
   repository: { nameWithOwner: string };
   title: string;
   url: string;
 }> {
-  const json = execFileSync(
-    "gh",
-    [
-      "search", "prs",
-      `--reviewed-by=${githubUser}`,
-      "--state=open",
-      "--json", "number,repository,title,url",
-      "--limit", "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+  const args = [
+    "search", "prs",
+    `--reviewed-by=${githubUser}`,
+    "--state=open",
+    "--json", "number,repository,title,url",
+    "--limit", "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as Array<{
     number: number;
     repository: { nameWithOwner: string };
@@ -144,10 +142,12 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
   if (!githubUser) return null;
 
   try {
+    const org = config.github.org;
     const targets = new Map<string, ReplyTarget>();
 
-    for (const pr of fetchReviewedPRs(githubUser)) {
+    for (const pr of fetchReviewedPRs(githubUser, org)) {
       if (config.reviewInbox.ignoreRepos.includes(pr.repository.nameWithOwner)) continue;
+      if (!belongsToOrg(pr.repository.nameWithOwner, org)) continue;
       targets.set(`${pr.repository.nameWithOwner}#${pr.number}`, {
         number: pr.number,
         repo: pr.repository.nameWithOwner,
@@ -162,6 +162,7 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
     for (const pr of readCache(config.dataDir)) {
       if (isTerminal(pr.state)) continue;
       if (config.github.ignoreRepos.includes(pr.repo)) continue;
+      if (!belongsToOrg(pr.repo, org)) continue;
       targets.set(`${pr.repo}#${pr.number}`, {
         number: pr.number,
         repo: pr.repo,

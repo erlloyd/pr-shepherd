@@ -2,7 +2,8 @@
   "autoMerge": true,
 
   "github": {
-    "authorUsername": "your-github-username"
+    "authorUsername": "your-github-username",
+    "org": null
   },
 
   "reviews": {

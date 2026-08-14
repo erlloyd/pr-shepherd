@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { sendToAgent } from "./notifications.js";
 import { routeToAgent } from "./ateam-conductor.js";
 import { appendEvent } from "./events.js";
-import { fetchCommentsByUsers } from "./github.js";
+import { fetchCommentsByUsers, belongsToOrg } from "./github.js";
 import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewAssignment, ReviewAssignmentStatus, PREventRecord } from "./types.js";
 
@@ -142,21 +142,19 @@ function botAutoApproved(number: number, repo: string, botUsername: string): boo
   return /###\s*✅\s*Auto-approved/i.test(latest.body);
 }
 
-export function fetchReviewRequests(githubUser: string): RawSearchResult[] {
-  const json = execFileSync(
-    "gh",
-    [
-      "search",
-      "prs",
-      `--review-requested=${githubUser}`,
-      "--state=open",
-      "--json",
-      "number,repository,title,url,isDraft,updatedAt",
-      "--limit",
-      "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+export function fetchReviewRequests(githubUser: string, org?: string | null): RawSearchResult[] {
+  const args = [
+    "search",
+    "prs",
+    `--review-requested=${githubUser}`,
+    "--state=open",
+    "--json",
+    "number,repository,title,url,isDraft,updatedAt",
+    "--limit",
+    "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as RawSearchResult[];
 }
 
@@ -166,7 +164,10 @@ export async function pollReviewInbox(
   if (!config.reviewInbox.enabled || !config.reviewInbox.githubUser) return null;
 
   try {
-    const results = fetchReviewRequests(config.reviewInbox.githubUser);
+    const org = config.github.org;
+    const results = fetchReviewRequests(config.reviewInbox.githubUser, org).filter((pr) =>
+      belongsToOrg(pr.repository.nameWithOwner, org),
+    );
     const inbox = readInbox(config.dataDir);
     const byKey = new Map(inbox.map((a) => [inboxKey(a.number, a.repo), a]));
     const username = config.reviewInbox.githubUser;
@@ -258,6 +259,7 @@ export async function pollReviewInbox(
 
     // Process each tracked assignment
     for (const assignment of inbox) {
+      if (!belongsToOrg(assignment.repo, org)) continue;
       if (assignment.status === "review_submitted" ||
           assignment.status === "merged_before_review" ||
           assignment.status === "closed") {
@@ -366,21 +368,24 @@ export async function pollReviewInbox(
             log.info(`[dry-run] would dispatch review of PR #${assignment.number} (${assignment.repo}) to ateam — skipping (notifiedAt NOT persisted)`);
           } else {
             log.debug(`dispatching review of PR #${assignment.number} (${assignment.repo}) to ateam`);
-            routeToAgent(config, msg, { reviewRequest: true });
-            assignment.notifiedAt = new Date().toISOString();
-            updated = true;
+            if (routeToAgent(config, msg, { reviewRequest: true })) {
+              assignment.notifiedAt = new Date().toISOString();
+              updated = true;
 
-            log.info(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
+              log.info(`Dispatched: PR #${assignment.number} (${assignment.repo}) — ${assignment.title}`);
 
-            appendEvent(config.dataDir, {
-              ts: assignment.notifiedAt,
-              pr: assignment.number,
-              repo: assignment.repo,
-              event: "review_requested",
-              from: "OPENED",
-              to: "OPENED",
-              details: { type: "review_inbox", title: assignment.title, url: assignment.url },
-            });
+              appendEvent(config.dataDir, {
+                ts: assignment.notifiedAt,
+                pr: assignment.number,
+                repo: assignment.repo,
+                event: "review_requested",
+                from: "OPENED",
+                to: "OPENED",
+                details: { type: "review_inbox", title: assignment.title, url: assignment.url },
+              });
+            } else {
+              log.info(`Dispatch failed for PR #${assignment.number} (${assignment.repo}) — will retry next poll`);
+            }
           }
         }
 
@@ -468,6 +473,7 @@ function formatReReviewMessage(assignment: ReviewAssignment): string {
     "",
     "You previously reviewed this PR. The author has addressed the findings and re-requested review.",
     "Verify each previously raised finding was addressed by the new commits and post a short follow-up review with the outcome per finding. Do not raise new findings.",
+    "If every prior finding is addressed, approve the PR (unless it is your own — then comment instead).",
   ].join("\n");
 }
 

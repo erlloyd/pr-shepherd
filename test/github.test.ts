@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments } from "../src/github.js";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments, belongsToOrg } from "../src/github.js";
 import type { IssueComment } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
@@ -56,6 +56,29 @@ describe("selectNewComments", () => {
 });
 
 describe("github", () => {
+  describe("belongsToOrg", () => {
+    it("matches repos in the configured org", () => {
+      expect(belongsToOrg("acme/widgets", "acme")).toBe(true);
+    });
+
+    it("rejects repos in other orgs", () => {
+      expect(belongsToOrg("megacorp/widgets", "acme")).toBe(false);
+    });
+
+    it("is case-insensitive on the owner", () => {
+      expect(belongsToOrg("ACME/widgets", "acme")).toBe(true);
+    });
+
+    it("does not match an org that is only a prefix of the owner", () => {
+      expect(belongsToOrg("acme-fork/widgets", "acme")).toBe(false);
+    });
+
+    it("matches everything when org is null or undefined", () => {
+      expect(belongsToOrg("megacorp/widgets", null)).toBe(true);
+      expect(belongsToOrg("megacorp/widgets", undefined)).toBe(true);
+    });
+  });
+
   describe("parseChecks", () => {
     it("parses raw checks into typed structures", () => {
       const raw = loadFixture<Array<{ name: string; state: string; bucket: string; workflow: string }>>(
@@ -221,6 +244,57 @@ describe("github", () => {
       const config = makeConfig({ requiredApprovals: 0 });
       const result = evaluateReviews([], config);
       expect(result.status).toBe("approved");
+    });
+
+    it("collects approvalBodies for approvals with substantive bodies (>20 chars)", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved, but the retry loop swallows timeout errors.", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "alice", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([
+        { reviewer: "canary", body: "Approved, but the retry loop swallows timeout errors." },
+      ]);
+    });
+
+    it("ignores whitespace-padded trivial approval bodies", () => {
+      const reviews: ReviewData[] = [
+        { author: "alice", state: "APPROVED", body: "   LGTM   \n\n          ", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("only considers the latest review per author for approvalBodies", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Older approval with a long substantive body.", submittedAt: "2026-06-15T18:00:00Z" },
+        { author: "canary", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("approved");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("returns empty approvalBodies when changes are requested", () => {
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "bob", state: "CHANGES_REQUESTED", body: "No", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("changes_requested");
+      expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("returns empty approvalBodies while approvals are below threshold", () => {
+      const config = makeConfig({ requiredApprovals: 2 });
+      const reviews: ReviewData[] = [
+        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, config);
+      expect(result.status).toBe("pending");
+      expect(result.approvalBodies).toEqual([]);
     });
   });
 

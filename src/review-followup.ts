@@ -7,6 +7,7 @@ import {
   fetchPRView,
   fetchUserReviews,
   hasNewCommitsSince,
+  belongsToOrg,
 } from "./github.js";
 import { createLogger } from "./log.js";
 import type { ShepherdConfig, ReviewFollowUp, PREventRecord } from "./types.js";
@@ -56,21 +57,19 @@ type RawSearchResult = {
   state: string;
 };
 
-function discoverReviewedPRs(username: string): RawSearchResult[] {
-  const json = execFileSync(
-    "gh",
-    [
-      "search",
-      "prs",
-      `--reviewed-by=${username}`,
-      "--state=open",
-      "--json",
-      "number,repository,title,url,isDraft,updatedAt,state",
-      "--limit",
-      "50",
-    ],
-    { encoding: "utf-8", timeout: 30_000 },
-  ).trim();
+function discoverReviewedPRs(username: string, org?: string | null): RawSearchResult[] {
+  const args = [
+    "search",
+    "prs",
+    `--reviewed-by=${username}`,
+    "--state=open",
+    "--json",
+    "number,repository,title,url,isDraft,updatedAt,state",
+    "--limit",
+    "50",
+  ];
+  if (org) args.push(`--owner=${org}`);
+  const json = execFileSync("gh", args, { encoding: "utf-8", timeout: 30_000 }).trim();
   return JSON.parse(json) as RawSearchResult[];
 }
 
@@ -80,7 +79,10 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<numbe
   const username = config.reviewInbox.githubUser;
 
   try {
-    const reviewed = discoverReviewedPRs(username);
+    const org = config.github.org;
+    const reviewed = discoverReviewedPRs(username, org).filter((pr) =>
+      belongsToOrg(pr.repository.nameWithOwner, org),
+    );
     const existing = readFollowUps(config.dataDir);
     const existingKeys = new Set(existing.map((f) => followUpKey(f.number, f.repo)));
 
@@ -136,6 +138,7 @@ export async function pollReviewFollowUps(config: ShepherdConfig): Promise<numbe
     }
 
     for (const followUp of existing) {
+      if (!belongsToOrg(followUp.repo, org)) continue;
       if (followUp.status !== "watching" && followUp.status !== "re_review_requested") continue;
 
       try {

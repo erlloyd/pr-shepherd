@@ -48,6 +48,7 @@ export type WatchedPR = {
   botFeedbackCount: number;
   lastReviewerCommentNotifiedAt: string | null;
   lastReviewerReviewCommentNotifiedAt: string | null;
+  lastConflictNotifiedAt: string | null;
 };
 
 export type PREventRecord = {
@@ -65,6 +66,11 @@ export type CheckStatus = {
   state: string;
   bucket: "pass" | "fail" | "pending" | "skipping" | "cancel";
   workflow: string;
+};
+
+export type ApprovalFeedback = {
+  reviewer: string;
+  body: string;
 };
 
 export type ReviewData = {
@@ -150,6 +156,7 @@ export type ShepherdConfig = {
   github: {
     defaultRepo: string | null;
     authorUsername: string | null;
+    org: string | null;
     ignoreRepos: string[];
   };
 
