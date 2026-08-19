@@ -36,6 +36,7 @@ const transitions: Record<PRState, TransitionTable> = {
   CI_FAILED: {
     new_commit: "CI_PENDING",
     ci_pending: "CI_PENDING",
+    ci_passed: "CI_PASSED",
     merged: "MERGED",
     closed: "CLOSED",
   },

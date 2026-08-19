@@ -72,6 +72,10 @@ describe("state-machine", () => {
       expect(transition("CI_FAILED", "new_commit")).toBe("CI_PENDING");
     });
 
+    it("moves CI_FAILED → CI_PASSED on ci_passed (same-SHA recovery)", () => {
+      expect(transition("CI_FAILED", "ci_passed")).toBe("CI_PASSED");
+    });
+
     it("moves APPROVED → AUTO_MERGE_ENABLED on auto_merge_enabled", () => {
       expect(transition("APPROVED", "auto_merge_enabled")).toBe(
         "AUTO_MERGE_ENABLED",

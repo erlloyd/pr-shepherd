@@ -905,3 +905,128 @@ describe("pollAll — org scoping", () => {
     expect(mockedRoute.mock.calls[0][1]).toContain("Merged");
   });
 });
+
+describe("pollAll — CI_FAILED still surfaces review feedback and recovers on same SHA", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_ci_failed");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedRoute: ReturnType<typeof vi.mocked<any>>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { routeToAgent } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedRoute = vi.mocked(routeToAgent);
+    mockedExec.mockReset();
+    mockedRoute.mockReset();
+  });
+
+  afterEach(() => rmSync(TMP, { recursive: true, force: true }));
+
+  function makeConfig(reviewerUsers: string[] = []): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      github: { defaultRepo: null, authorUsername: "erlloyd", ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+      reviews: { ignoreUsers: [], botUsers: [], reviewerUsers },
+    };
+  }
+
+  function cachedPR(): WatchedPR {
+    return {
+      number: 512,
+      repo: "acme/widgets",
+      title: "feat: relay",
+      url: "https://github.com/acme/widgets/pull/512",
+      state: "CI_FAILED",
+      headSha: "abc123",
+      lastCheckedAt: new Date().toISOString(),
+      lastEventAt: new Date().toISOString(),
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+    };
+  }
+
+  function openSearch(): string {
+    return JSON.stringify([
+      {
+        number: 512,
+        repository: { name: "widgets", nameWithOwner: "acme/widgets" },
+        title: "feat: relay",
+        url: "https://github.com/acme/widgets/pull/512",
+        isDraft: false,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+  }
+
+  function prView(): string {
+    return JSON.stringify({
+      number: 512,
+      state: "OPEN",
+      reviewDecision: "REVIEW_REQUIRED",
+      mergeStateStatus: "BLOCKED",
+      mergeable: "MERGEABLE",
+      autoMergeRequest: null,
+      mergedAt: null,
+      closedAt: null,
+      headRefOid: "abc123",
+    });
+  }
+
+  const failingChecks = JSON.stringify([
+    { name: "lint", state: "FAILURE", bucket: "fail", workflow: "ci" },
+  ]);
+  const passingChecks = JSON.stringify([
+    { name: "lint", state: "SUCCESS", bucket: "pass", workflow: "ci" },
+  ]);
+  const noReviews = JSON.stringify({ reviews: [] });
+
+  it("forwards a whitelisted reviewer's comment while CI is still red", async () => {
+    const config = makeConfig(["zach-mgt"]);
+    upsertCachedPR(TMP, cachedPR());
+
+    mockedExec
+      .mockReturnValueOnce(openSearch() as any) // discoverAuthoredPRs
+      .mockReturnValueOnce(prView() as any) // fetchPRView
+      .mockReturnValueOnce(failingChecks as any) // fetchChecks
+      .mockReturnValueOnce(noReviews as any) // fetchReviews
+      .mockReturnValueOnce(
+        JSON.stringify([
+          { user: { login: "zach-mgt" }, body: "rename this export", created_at: "2026-08-18T14:09:00Z" },
+        ]) as any,
+      ) // handleReviewerComments — issue comments
+      .mockReturnValueOnce("[]" as any); // handleReviewerComments — review comments
+
+    await pollAll(config);
+
+    // CI is still red, so the PR stays put — but the feedback reached the agent.
+    expect(readCache(TMP)[0].state).toBe("CI_FAILED");
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const msg = mockedRoute.mock.calls[0][1];
+    expect(msg).toContain("Reviewer Comment from @zach-mgt");
+    expect(msg).toContain("rename this export");
+    expect(readCache(TMP)[0].lastReviewerCommentNotifiedAt).toBe("2026-08-18T14:09:00Z");
+  });
+
+  it("recovers CI_FAILED → CI_PASSED when checks pass on the same commit", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR());
+
+    mockedExec
+      .mockReturnValueOnce(openSearch() as any) // discoverAuthoredPRs
+      .mockReturnValueOnce(prView() as any) // fetchPRView
+      .mockReturnValueOnce(passingChecks as any) // fetchChecks
+      .mockReturnValueOnce(noReviews as any); // fetchReviews
+
+    await pollAll(config);
+
+    expect(readCache(TMP)[0].state).toBe("CI_PASSED");
+    expect(mockedRoute).not.toHaveBeenCalled();
+  });
+});

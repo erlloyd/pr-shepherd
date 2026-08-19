@@ -366,6 +366,25 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       }
     }
 
+    if (pr.state === "CI_FAILED") {
+      // CI can go green on the same commit (e.g. a failing required check that
+      // was re-run and passed). CI_FAILED has no other CI re-evaluation, so
+      // without this the PR is stuck until a new commit arrives.
+      const checkResult = evaluateChecks(checks, config);
+      if (checkResult.status === "pass") {
+        tryTransition(config, pr, "ci_passed");
+      }
+
+      // Review feedback must still reach the agent while CI is red — the two
+      // aren't mutually exclusive. Comment forwarding is state-neutral (own
+      // cursors), so it's safe here without a state change. If CI just
+      // recovered above, the CI_PASSED block below handles comments instead.
+      if (pr.state === "CI_FAILED") {
+        await handleBotComments(config, pr);
+        await handleReviewerComments(config, pr);
+      }
+    }
+
     if (pr.state === "APPROVED" && prView.autoMergeRequest) {
       tryTransition(config, pr, "auto_merge_enabled");
     }
