@@ -8,7 +8,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Import the module under test AFTER mocking so it picks up the mock
-const { routeToAgent } = await import("../src/ateam-conductor.js");
+const { routeToAgent, reapClosedReviews } = await import("../src/ateam-conductor.js");
 const { execFileSync } = await import("node:child_process");
 const mockedExec = vi.mocked(execFileSync);
 
@@ -258,6 +258,45 @@ describe("ateam-conductor", () => {
       const bodyFile = args[args.indexOf("--body-file") + 1];
       // File should have been deleted already
       expect(existsSync(bodyFile)).toBe(false);
+    });
+  });
+
+  describe("reapClosedReviews", () => {
+    it("invokes ateam reap with no target", () => {
+      reapClosedReviews(makeConfig());
+
+      expect(mockedExec).toHaveBeenCalledTimes(1);
+      const [bin, args] = mockedExec.mock.calls[0] as [string, string[]];
+      expect(bin).toBe("ateam");
+      expect(args).toEqual(["reap"]);
+    });
+
+    it("uses PR_SHEPHERD_ATEAM_PATH env var when set", () => {
+      process.env.PR_SHEPHERD_ATEAM_PATH = "/usr/local/bin/my-ateam";
+
+      reapClosedReviews(makeConfig());
+
+      const [bin] = mockedExec.mock.calls[0] as [string, string[]];
+      expect(bin).toBe("/usr/local/bin/my-ateam");
+    });
+
+    it("skips exec and logs dry-run message", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      reapClosedReviews(makeConfig({ dryRun: true }));
+
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("[dry-run]"));
+      consoleSpy.mockRestore();
+    });
+
+    it("logs but does not throw when ateam reap fails", () => {
+      mockedExec.mockImplementationOnce(() => { throw new Error("ateam not found"); });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      expect(() => reapClosedReviews(makeConfig())).not.toThrow();
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("ateam reap failed"));
+      consoleSpy.mockRestore();
     });
   });
 });

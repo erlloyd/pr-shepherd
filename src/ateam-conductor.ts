@@ -111,3 +111,31 @@ export function routeToAgent(
     try { unlinkSync(tmpFile); } catch { /* ignore */ }
   }
 }
+
+// Invokes `ateam reap` with no target (scan mode) once per pr-shepherd tick.
+// Scan mode enumerates closed review initiatives on the agent-teams side and
+// tears down any that have cleared their grace period — this is the trigger
+// that closes the loop, independent of PR-event volume. Mirrors
+// routeToAgent's binary resolution, dry-run guard, and swallow-on-failure
+// behavior, but carries no PR identity: scan mode resolves its own targets.
+export function reapClosedReviews(config: ShepherdConfig): void {
+  const ateam = process.env.PR_SHEPHERD_ATEAM_PATH ?? "ateam";
+
+  if (config.dryRun) {
+    log.info("[dry-run] would run ateam reap (scan mode)");
+    return;
+  }
+
+  try {
+    log.debug(`exec: ${ateam} reap`);
+    const output = execFileSync(ateam, ["reap"], { encoding: "utf-8", timeout: 30_000, stdio: ["pipe", "pipe", "pipe"] });
+    if (output && output.trim()) {
+      log.debug(`reap stdout: ${output.trim().replace(/\s+/g, " ").slice(0, 200)}`);
+    }
+    log.debug(`reap exited successfully`);
+  } catch (err) {
+    const error = err as Error & { stdout?: string; stderr?: string };
+    const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim().slice(0, 500);
+    log.error(`ateam reap failed: ${error.message}${captured ? `\n${captured}` : ""}`);
+  }
+}
