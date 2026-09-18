@@ -14,6 +14,7 @@ import {
   fetchMergeQueueStatus,
   belongsToOrg,
 } from "./github.js";
+import { reapClosedReviews } from "./ateam-conductor.js";
 import { readCache, upsertCachedPR, removeCachedPR, getCachedPR } from "./state-cache.js";
 import { appendEvent } from "./events.js";
 import { transition, isTerminal } from "./state-machine.js";
@@ -635,6 +636,10 @@ export async function startDaemon(config: ShepherdConfig): Promise<void> {
     const followups = await safe("followups", null, () => pollReviewFollowUps(config));
     const nudges = await safe("nudges", null, () => pollReviewerNudges(config));
     const replyTargets = await safe("reply-watch", null, () => pollReplyWatch(config));
+    await safe("reap", null, async () => {
+      reapClosedReviews(config);
+      return null;
+    });
 
     const parts = [`${authored} authored`];
     if (inbox !== null) parts.push(`${inbox.active} inbox${inbox.reReviews > 0 ? ` (${inbox.reReviews} re-review pending)` : ""}`);

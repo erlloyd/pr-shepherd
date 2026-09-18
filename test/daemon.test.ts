@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { filterAuthoredPRs, pollAll } from "../src/daemon.js";
+import { filterAuthoredPRs, pollAll, startDaemon } from "../src/daemon.js";
 import { DEFAULTS } from "../src/config.js";
 import { upsertCachedPR, readCache } from "../src/state-cache.js";
 import type { ShepherdConfig, WatchedPR } from "../src/types.js";
@@ -11,9 +11,13 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
 
-// Mock ateam-conductor so routeToAgent never execs
+// Mock ateam-conductor so routeToAgent and reapClosedReviews never exec.
+// reapClosedReviews must be included here — without it, any test that
+// reaches runCycle's reap poller resolves it to undefined, which throws
+// when called and is silently swallowed by daemon.ts's safe() wrapper.
 vi.mock("../src/ateam-conductor.js", () => ({
   routeToAgent: vi.fn(),
+  reapClosedReviews: vi.fn(),
 }));
 
 function makePR(nameWithOwner: string, isDraft = false, number = 1) {
@@ -1028,5 +1032,78 @@ describe("pollAll — CI_FAILED still surfaces review feedback and recovers on s
 
     expect(readCache(TMP)[0].state).toBe("CI_PASSED");
     expect(mockedRoute).not.toHaveBeenCalled();
+  });
+});
+
+describe("startDaemon — runCycle wiring for the reap poller", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_runcycle");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedReap: ReturnType<typeof vi.mocked<any>>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { reapClosedReviews } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedReap = vi.mocked(reapClosedReviews);
+    mockedExec.mockReset();
+    mockedReap.mockReset();
+    // runCycle's own setInterval must never fire during this test — fake
+    // timers keep startDaemon's single awaited cycle from spawning a real,
+    // unbounded polling loop.
+    vi.useFakeTimers();
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    rmSync(TMP, { recursive: true, force: true });
+  });
+
+  function makeConfig(): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      github: { defaultRepo: null, authorUsername: "erlloyd", ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+      // Disable the other opt-in pollers (reviewInbox/reviewFollowUp/
+      // reviewerNudge are already off in DEFAULTS) so the only pollers this
+      // cycle actually runs are "authored" (pollAll) and "reap".
+      replyWatch: { enabled: false },
+    };
+  }
+
+  it("invokes reapClosedReviews exactly once per cycle", async () => {
+    mockedExec.mockReturnValueOnce("[]" as any); // discoverAuthoredPRs
+
+    await startDaemon(makeConfig());
+
+    expect(mockedReap).toHaveBeenCalledTimes(1);
+    expect(mockedExec).toHaveBeenCalledTimes(1); // authored poll still ran
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("poll ok"));
+  });
+
+  it("does not abort the cycle when reapClosedReviews throws — the authored poller still ran and the cycle still reports degraded, not aborted", async () => {
+    mockedExec.mockReturnValueOnce("[]" as any); // discoverAuthoredPRs
+    mockedReap.mockImplementationOnce(() => {
+      throw new Error("reap boom");
+    });
+
+    await expect(startDaemon(makeConfig())).resolves.toBeUndefined();
+
+    expect(mockedReap).toHaveBeenCalledTimes(1);
+    expect(mockedExec).toHaveBeenCalledTimes(1); // authored poll ran before reap threw
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("reap poll failed: reap boom"));
+    // The code after the reap call (the summary log line) still executed —
+    // this is the observable proof that safe() caught the throw instead of
+    // letting it abort the rest of runCycle.
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("poll degraded (1 poller(s) failed)"));
   });
 });
