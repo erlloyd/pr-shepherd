@@ -261,6 +261,39 @@ async function handleReviewerComments(config: ShepherdConfig, pr: WatchedPR): Pr
   return true;
 }
 
+// Forward substantive COMMENTED-verdict review bodies (from evaluateReviews) to
+// the agent. These live at pulls/{n}/reviews — a surface handleReviewerComments
+// (issue + inline-thread comments) never scans, and evaluateReviews buckets only
+// APPROVED/CHANGES_REQUESTED, so without this a comment review reaches no one.
+// Deduped by a submittedAt cursor because a formal review persists across every
+// poll; a missing cursor (existing cache entries) forwards current ones once.
+async function forwardCommentedReviews(
+  config: ShepherdConfig,
+  pr: WatchedPR,
+  commentedBodies: ApprovalFeedback[],
+): Promise<boolean> {
+  const cursor = pr.lastCommentedReviewNotifiedAt;
+  const fresh = commentedBodies.filter((r) => !cursor || r.submittedAt > cursor);
+  if (fresh.length === 0) return false;
+
+  for (const review of fresh) {
+    const msg = formatReviewMessage(pr.number, pr.repo, review.reviewer, "COMMENTED", review.body);
+    log.info(`Comment review from @${review.reviewer} on PR #${pr.number}`);
+    if (!config.dryRun) {
+      await sendToAgent(config, config.notifications.notifyAgent!, msg);
+    }
+  }
+
+  if (!config.dryRun) {
+    pr.lastCommentedReviewNotifiedAt = fresh.reduce(
+      (latest, r) => (r.submittedAt > latest ? r.submittedAt : latest),
+      cursor ?? "",
+    );
+    upsertCachedPR(config.dataDir, pr);
+  }
+  return true;
+}
+
 // Handles a live PR view showing MERGED/CLOSED, whatever our cached state.
 // Returns true if it matched (and was therefore fully handled + removed from
 // cache) so callers can skip further processing for this PR.
@@ -383,6 +416,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       if (pr.state === "CI_FAILED") {
         await handleBotComments(config, pr);
         await handleReviewerComments(config, pr);
+        await forwardCommentedReviews(config, pr, evaluateReviews(reviews, config).commentedBodies);
       }
     }
 
@@ -467,6 +501,10 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         // CI regressed or PR closed — skip review processing
       } else {
       const reviewResult = evaluateReviews(reviews, config);
+
+      // Comment reviews are orthogonal to the approve/change-request/pending
+      // status, so forward them before the status chain regardless of branch.
+      await forwardCommentedReviews(config, pr, reviewResult.commentedBodies);
 
       if (reviewResult.status === "changes_requested") {
         const reviewer = reviewResult.changesRequested[0];
@@ -557,6 +595,7 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
       botFeedbackCount: 0,
       lastReviewerCommentNotifiedAt: null,
       lastReviewerReviewCommentNotifiedAt: null,
+      lastCommentedReviewNotifiedAt: null,
       lastConflictNotifiedAt: null,
     };
 

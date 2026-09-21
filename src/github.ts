@@ -347,6 +347,7 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   approvals: number;
   changesRequested: ReviewData[];
   approvalBodies: ApprovalFeedback[];
+  commentedBodies: ApprovalFeedback[];
 } {
   const latestByAuthor = new Map<string, ReviewData>();
   for (const review of reviews) {
@@ -364,15 +365,24 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   );
   const approvalBodies = approved
     .filter((r) => r.body.trim().length > 20)
-    .map((r) => ({ reviewer: r.author, body: r.body }));
+    .map((r) => ({ reviewer: r.author, body: r.body, submittedAt: r.submittedAt }));
+
+  // Reviews submitted with the COMMENTED verdict are neither approvals nor
+  // change requests, so their bodies reach the agent through no other path.
+  // Surface substantive ones (same >20-char threshold as approval feedback)
+  // regardless of the aggregate status — a comment review can coexist with an
+  // approval or a change request from another author.
+  const commentedBodies = latest
+    .filter((r) => r.state === "COMMENTED" && r.body.trim().length > 20)
+    .map((r) => ({ reviewer: r.author, body: r.body, submittedAt: r.submittedAt }));
 
   if (changesRequested.length > 0) {
-    return { status: "changes_requested", approvals, changesRequested, approvalBodies: [] };
+    return { status: "changes_requested", approvals, changesRequested, approvalBodies: [], commentedBodies };
   }
   if (approvals >= config.requiredApprovals) {
-    return { status: "approved", approvals, changesRequested: [], approvalBodies };
+    return { status: "approved", approvals, changesRequested: [], approvalBodies, commentedBodies };
   }
-  return { status: "pending", approvals, changesRequested: [], approvalBodies: [] };
+  return { status: "pending", approvals, changesRequested: [], approvalBodies: [], commentedBodies };
 }
 
 export function buildSnapshot(

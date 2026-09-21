@@ -11,6 +11,7 @@ A single long-running Node.js process with two polling loops on a shared interva
    - **Review with changes requested** → sends the full review body to the agent
    - **Bot review feedback** → for each user in `reviews.botUsers`, scans PR issue comments for actionable findings (`❌`) and forwards them to the agent. Capped at `botFeedback.maxAttempts` per PR.
    - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
+   - **Comment review** → a formal review submitted with the `COMMENTED` verdict (the "Comment" button, neither approve nor request-changes) has its body relayed to the agent when the body is over 20 chars. Applies to any reviewer, not just the `reviewerUsers` whitelist — like approvals and change requests, a formal review is a deliberate action. This body lives at `pulls/{n}/reviews`, a surface the reviewer-comment path (issue and inline-thread comments) never scans, so without this it reaches no one. Deduped by a per-PR `submittedAt` cursor because a formal review persists across every poll; forwarded in watched states including while CI is red.
    - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
    - **Approved with feedback** → approval review bodies over 20 chars (e.g. a bot approving while listing warnings) are relayed to the agent alongside the approval, including when auto-merge is already enabled
    - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges. Skipped when `mergeQueue.enabled` — the queue rebases queued PRs itself.
@@ -106,7 +107,7 @@ at `warn` level instead of `info`.
 ## Tests
 
 ```bash
-npm test            # 257 tests across 11 files
+npm test            # 268 tests across 11 files
 npm run typecheck   # Clean TypeScript check
 ```
 

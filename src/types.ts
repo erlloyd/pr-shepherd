@@ -48,6 +48,7 @@ export type WatchedPR = {
   botFeedbackCount: number;
   lastReviewerCommentNotifiedAt: string | null;
   lastReviewerReviewCommentNotifiedAt: string | null;
+  lastCommentedReviewNotifiedAt: string | null;
   lastConflictNotifiedAt: string | null;
 };
 
@@ -71,6 +72,7 @@ export type CheckStatus = {
 export type ApprovalFeedback = {
   reviewer: string;
   body: string;
+  submittedAt: string;
 };
 
 export type ReviewData = {

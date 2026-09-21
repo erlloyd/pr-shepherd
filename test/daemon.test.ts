@@ -1107,3 +1107,137 @@ describe("startDaemon — runCycle wiring for the reap poller", () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("poll degraded (1 poller(s) failed)"));
   });
 });
+
+describe("pollAll — comment-review relay", () => {
+  const TMP = join(import.meta.dirname, "__tmp_daemon_comment_review");
+
+  let mockedExec: ReturnType<typeof vi.mocked<any>>;
+  let mockedRoute: ReturnType<typeof vi.mocked<any>>;
+
+  beforeEach(async () => {
+    mkdirSync(TMP, { recursive: true });
+    const { execFileSync } = await import("node:child_process");
+    const { routeToAgent } = await import("../src/ateam-conductor.js");
+    mockedExec = vi.mocked(execFileSync);
+    mockedRoute = vi.mocked(routeToAgent);
+    mockedExec.mockReset();
+    mockedRoute.mockReset();
+  });
+
+  afterEach(() => rmSync(TMP, { recursive: true, force: true }));
+
+  function makeConfig(): ShepherdConfig {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULTS)),
+      dataDir: TMP,
+      dryRun: false,
+      requiredApprovals: 2,
+      github: { defaultRepo: null, authorUsername: "erlloyd", ignoreRepos: [] },
+      notifications: { ...DEFAULTS.notifications, notifyAgent: "worker" },
+      reviews: { ignoreUsers: [], botUsers: [], reviewerUsers: [] },
+    };
+  }
+
+  function cachedPR(): WatchedPR {
+    return {
+      number: 6055,
+      repo: "acme/widgets",
+      title: "feat: reject out-of-options enum values",
+      url: "https://github.com/acme/widgets/pull/6055",
+      state: "AWAITING_REVIEW",
+      headSha: "abc123",
+      lastCheckedAt: new Date().toISOString(),
+      lastEventAt: new Date().toISOString(),
+      lastBotCommentNotifiedAt: null,
+      botFeedbackCount: 0,
+      lastReviewerCommentNotifiedAt: null,
+      lastReviewerReviewCommentNotifiedAt: null,
+      lastCommentedReviewNotifiedAt: null,
+      lastConflictNotifiedAt: null,
+    };
+  }
+
+  function openSearch(): string {
+    return JSON.stringify([
+      {
+        number: 6055,
+        repository: { name: "widgets", nameWithOwner: "acme/widgets" },
+        title: "feat: reject out-of-options enum values",
+        url: "https://github.com/acme/widgets/pull/6055",
+        isDraft: false,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+  }
+
+  function prView(): string {
+    return JSON.stringify({
+      number: 6055,
+      state: "OPEN",
+      reviewDecision: "REVIEW_REQUIRED",
+      mergeStateStatus: "BLOCKED",
+      mergeable: "MERGEABLE",
+      autoMergeRequest: null,
+      mergedAt: null,
+      closedAt: null,
+      headRefOid: "abc123",
+    });
+  }
+
+  const passingChecks = JSON.stringify([
+    { name: "lint", state: "SUCCESS", bucket: "pass", workflow: "ci" },
+  ]);
+
+  const commentReview = JSON.stringify({
+    reviews: [
+      {
+        author: { login: "matt-evanoff" },
+        state: "COMMENTED",
+        body: "The enum guard runs after the write — move it ahead of the persist call.",
+        submittedAt: "2026-08-26T17:29:19Z",
+      },
+    ],
+  });
+
+  it("forwards a COMMENTED-verdict review body the reviewer-comment path never scans", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR());
+
+    mockedExec
+      .mockReturnValueOnce(openSearch() as any) // discoverAuthoredPRs
+      .mockReturnValueOnce(prView() as any) // fetchPRView
+      .mockReturnValueOnce(passingChecks as any) // fetchChecks
+      .mockReturnValueOnce(commentReview as any); // fetchReviews
+
+    await pollAll(config);
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const msg = mockedRoute.mock.calls[0][1];
+    expect(msg).toContain("Review Comment");
+    expect(msg).toContain("matt-evanoff");
+    expect(msg).toContain("move it ahead of the persist call");
+    expect(readCache(TMP)[0].lastCommentedReviewNotifiedAt).toBe("2026-08-26T17:29:19Z");
+  });
+
+  it("does not re-notify the same comment review on a later poll", async () => {
+    const config = makeConfig();
+    upsertCachedPR(TMP, cachedPR());
+
+    const feed = () =>
+      mockedExec
+        .mockReturnValueOnce(openSearch() as any)
+        .mockReturnValueOnce(prView() as any)
+        .mockReturnValueOnce(passingChecks as any)
+        .mockReturnValueOnce(commentReview as any);
+
+    feed();
+    await pollAll(config);
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+
+    mockedExec.mockReset();
+    feed();
+    await pollAll(config);
+    // Cursor already at the review's submittedAt — no second send.
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+  });
+});

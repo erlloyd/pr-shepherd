@@ -55,6 +55,12 @@ export function formatReviewMessage(
 ): string {
   const action =
     state === "CHANGES_REQUESTED" ? "Changes Requested" : "Review Comment";
+  const footer =
+    state === "CHANGES_REQUESTED"
+      ? "Please address the feedback and push a fix."
+      : state === "COMMENTED"
+        ? "Review feedback left as a comment review (not a formal approval or change request). Review it and address anything actionable."
+        : "FYI — review comment posted.";
   return [
     `[PR Shepherd] PR #${prNumber} (${repo}) — ${action}`,
     "",
@@ -62,9 +68,7 @@ export function formatReviewMessage(
     "",
     body,
     "",
-    state === "CHANGES_REQUESTED"
-      ? "Please address the feedback and push a fix."
-      : "FYI — review comment posted.",
+    footer,
   ].join("\n");
 }
 

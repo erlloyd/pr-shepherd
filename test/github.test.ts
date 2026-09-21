@@ -254,7 +254,7 @@ describe("github", () => {
       const result = evaluateReviews(reviews, makeConfig());
       expect(result.status).toBe("approved");
       expect(result.approvalBodies).toEqual([
-        { reviewer: "canary", body: "Approved, but the retry loop swallows timeout errors." },
+        { reviewer: "canary", body: "Approved, but the retry loop swallows timeout errors.", submittedAt: "2026-06-15T19:00:00Z" },
       ]);
     });
 
@@ -275,6 +275,59 @@ describe("github", () => {
       const result = evaluateReviews(reviews, makeConfig());
       expect(result.status).toBe("approved");
       expect(result.approvalBodies).toEqual([]);
+    });
+
+    it("collects commentedBodies for COMMENTED reviews with substantive bodies (>20 chars)", () => {
+      const reviews: ReviewData[] = [
+        { author: "matt", state: "COMMENTED", body: "A few concerns about the enum validation path.", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("pending");
+      expect(result.commentedBodies).toEqual([
+        { reviewer: "matt", body: "A few concerns about the enum validation path.", submittedAt: "2026-06-15T19:00:00Z" },
+      ]);
+    });
+
+    it("ignores trivial COMMENTED bodies (<=20 chars)", () => {
+      const reviews: ReviewData[] = [
+        { author: "matt", state: "COMMENTED", body: "nice", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.commentedBodies).toEqual([]);
+    });
+
+    it("surfaces commentedBodies alongside an approval from another author", () => {
+      const config = makeConfig({ requiredApprovals: 1 });
+      const reviews: ReviewData[] = [
+        { author: "alice", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "matt", state: "COMMENTED", body: "Approving-adjacent, but check the timeout branch.", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, config);
+      expect(result.status).toBe("approved");
+      expect(result.commentedBodies).toEqual([
+        { reviewer: "matt", body: "Approving-adjacent, but check the timeout branch.", submittedAt: "2026-06-15T19:01:00Z" },
+      ]);
+    });
+
+    it("surfaces commentedBodies alongside a change request from another author", () => {
+      const reviews: ReviewData[] = [
+        { author: "bob", state: "CHANGES_REQUESTED", body: "Blocking on the missing guard.", submittedAt: "2026-06-15T19:00:00Z" },
+        { author: "matt", state: "COMMENTED", body: "Non-blocking, but the naming here is confusing.", submittedAt: "2026-06-15T19:01:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.status).toBe("changes_requested");
+      expect(result.commentedBodies).toEqual([
+        { reviewer: "matt", body: "Non-blocking, but the naming here is confusing.", submittedAt: "2026-06-15T19:01:00Z" },
+      ]);
+    });
+
+    it("only considers the latest review per author for commentedBodies", () => {
+      const reviews: ReviewData[] = [
+        { author: "matt", state: "COMMENTED", body: "An earlier substantive comment review body.", submittedAt: "2026-06-15T18:00:00Z" },
+        { author: "matt", state: "APPROVED", body: "LGTM now", submittedAt: "2026-06-15T19:00:00Z" },
+      ];
+      const result = evaluateReviews(reviews, makeConfig());
+      expect(result.commentedBodies).toEqual([]);
     });
 
     it("returns empty approvalBodies when changes are requested", () => {
