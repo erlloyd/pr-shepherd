@@ -128,7 +128,13 @@ export function reapClosedReviews(config: ShepherdConfig): void {
 
   try {
     log.debug(`exec: ${ateam} reap`);
-    const output = execFileSync(ateam, ["reap"], { encoding: "utf-8", timeout: 30_000, stdio: ["pipe", "pipe", "pipe"] });
+    // 90s, not 30s: a scan tick removes review worktrees, and removing one is a
+    // full checkout deletion (a midgard worktree carries a ~3GB node_modules,
+    // ~14-28s of legitimate filesystem work). 30s killed the tick mid-removal
+    // every time; 90s gives one removal comfortable headroom. ateam's own scan
+    // deadline still caps how many it starts per tick, so this bounds a stall,
+    // not steady-state throughput.
+    const output = execFileSync(ateam, ["reap"], { encoding: "utf-8", timeout: 90_000, stdio: ["pipe", "pipe", "pipe"] });
     if (output && output.trim()) {
       log.debug(`reap stdout: ${output.trim().replace(/\s+/g, " ").slice(0, 200)}`);
     }
