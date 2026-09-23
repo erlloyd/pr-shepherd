@@ -136,7 +136,7 @@ export function reapClosedReviews(config: ShepherdConfig): void {
     // not steady-state throughput.
     const output = execFileSync(ateam, ["reap"], { encoding: "utf-8", timeout: 90_000, stdio: ["pipe", "pipe", "pipe"] });
     if (output && output.trim()) {
-      log.debug(`reap stdout: ${output.trim().replace(/\s+/g, " ").slice(0, 200)}`);
+      log.info(`reap stdout: ${output.trim().replace(/\s+/g, " ")}`);
     }
     log.debug(`reap exited successfully`);
   } catch (err) {
