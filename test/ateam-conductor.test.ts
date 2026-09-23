@@ -298,5 +298,23 @@ describe("ateam-conductor", () => {
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("ateam reap failed"));
       consoleSpy.mockRestore();
     });
+
+    it("logs the scan summary at info level, untruncated", () => {
+      // 217 chars — well past the old 200-char slice boundary.
+      const summary =
+        "reap: scan summary — review=128 processed=114 already-reaped-revisited=37 sessions-torn-down=89 " +
+        "worktrees-removed=76 worktrees-already-gone=21 worktrees-skipped=6 worktrees-failed=2 " +
+        "grace-skipped=43 codex-skipped=59";
+      mockedExec.mockReturnValueOnce(summary as unknown as ReturnType<typeof execFileSync>);
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      // log.debug is a no-op unless setVerbose(true) was called, which this
+      // suite never does — so this call only produces console.log output at
+      // all if the reap stdout line was switched to log.info.
+      reapClosedReviews(makeConfig());
+
+      expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining("codex-skipped=59"));
+      consoleLogSpy.mockRestore();
+    });
   });
 });
