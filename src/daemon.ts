@@ -398,6 +398,15 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
           await handleTransition(config, pr, "CI_FAILED", details);
         }
       }
+
+      // Reviews often arrive while CI is still running, and a slow or on-demand
+      // check can hold a PR here for its whole review window. If CI just settled
+      // above, the CI_FAILED or CI_PASSED block below forwards comments instead.
+      if (pr.state === "CI_PENDING") {
+        await handleBotComments(config, pr);
+        await handleReviewerComments(config, pr);
+        await forwardCommentedReviews(config, pr, evaluateReviews(reviews, config).commentedBodies);
+      }
     }
 
     if (pr.state === "CI_FAILED") {
