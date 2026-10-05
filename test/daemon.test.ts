@@ -1018,6 +1018,47 @@ describe("pollAll — CI_FAILED still surfaces review feedback and recovers on s
     expect(readCache(TMP)[0].lastReviewerCommentNotifiedAt).toBe("2026-08-18T14:09:00Z");
   });
 
+  it("forwards a reviewer's inline comment and comment review while CI is still pending", async () => {
+    const config = makeConfig(["ianlancaster"]);
+    upsertCachedPR(TMP, { ...cachedPR(), state: "CI_PENDING", lastCommentedReviewNotifiedAt: null });
+
+    mockedExec
+      .mockReturnValueOnce(openSearch() as any) // discoverAuthoredPRs
+      .mockReturnValueOnce(prView() as any) // fetchPRView
+      .mockReturnValueOnce(
+        JSON.stringify([{ name: "test", state: "PENDING", bucket: "pending", workflow: "ci" }]) as any,
+      ) // fetchChecks
+      .mockReturnValueOnce(
+        JSON.stringify({
+          reviews: [
+            {
+              author: { login: "ianlancaster" },
+              state: "COMMENTED",
+              body: "Two findings inline; the --until bound is the main one.",
+              submittedAt: "2026-10-01T20:08:47Z",
+            },
+          ],
+        }) as any,
+      ) // fetchReviews
+      .mockReturnValueOnce("[]" as any) // handleReviewerComments — issue comments
+      .mockReturnValueOnce(
+        JSON.stringify([
+          { user: { login: "ianlancaster" }, body: "`--until` bounds the fetch but is discarded here", created_at: "2026-10-01T20:08:48Z" },
+        ]) as any,
+      ); // handleReviewerComments — review comments
+
+    await pollAll(config);
+
+    const cached = readCache(TMP)[0];
+    expect(cached.state).toBe("CI_PENDING");
+    expect(mockedRoute).toHaveBeenCalledTimes(2);
+    const msgs = mockedRoute.mock.calls.map((c: unknown[]) => c[1] as string);
+    expect(msgs.some((m) => m.includes("Reviewer Comment from @ianlancaster") && m.includes("--until"))).toBe(true);
+    expect(msgs.some((m) => m.includes("Review Comment") && m.includes("the main one"))).toBe(true);
+    expect(cached.lastReviewerReviewCommentNotifiedAt).toBe("2026-10-01T20:08:48Z");
+    expect(cached.lastCommentedReviewNotifiedAt).toBe("2026-10-01T20:08:47Z");
+  });
+
   it("recovers CI_FAILED → CI_PASSED when checks pass on the same commit", async () => {
     const config = makeConfig();
     upsertCachedPR(TMP, cachedPR());
