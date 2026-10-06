@@ -373,6 +373,46 @@ describe("pollReplyWatch", () => {
     expect(msg).not.toContain("already handled via review stream");
   });
 
+  it("on authored PRs, leaves exactly the replies the unified forwarder owns (listed bot with ❌) to it", async () => {
+    const watched: WatchedPR = {
+      number: 14,
+      repo: "acme/ours",
+      title: "our third feature",
+      url: "https://github.com/acme/ours/pull/14",
+      state: "CI_PENDING",
+      headSha: null,
+      lastCheckedAt: null,
+      lastEventAt: null,
+      botFeedbackCount: 0,
+      forwardedFeedbackIds: [],
+    };
+    writeCache(TMP_RW, [watched]);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(
+      join(TMP_RW, "reply-watch.json"),
+      JSON.stringify([{ number: 14, repo: "acme/ours", lastReplyNotifiedAt: "2026-07-14T09:00:00Z" }]),
+    );
+
+    const thread = JSON.stringify([
+      { id: 400, user: { login: "shepherd" }, body: "our note", created_at: "2026-07-14T09:00:00Z", path: "src/d.ts" },
+      { id: 401, in_reply_to_id: 400, user: { login: "canary[bot]" }, body: "❌ still broken", created_at: "2026-07-14T10:00:00Z", path: "src/d.ts" },
+      { id: 402, in_reply_to_id: 400, user: { login: "canary[bot]" }, body: "looks fine now", created_at: "2026-07-14T10:30:00Z", path: "src/d.ts" },
+      { id: 403, in_reply_to_id: 400, user: { login: "carol" }, body: "unlisted human reply", created_at: "2026-07-14T11:00:00Z", path: "src/d.ts" },
+    ]);
+
+    mockedExec
+      .mockReturnValueOnce("[]" as unknown as ReturnType<typeof execFileSync>)
+      .mockReturnValueOnce(thread as unknown as ReturnType<typeof execFileSync>);
+
+    await pollReplyWatch(makeConfig({ reviews: { ignoreUsers: [], botUsers: ["canary[bot]"], reviewerUsers: [] } }));
+
+    expect(mockedRoute).toHaveBeenCalledTimes(1);
+    const msg = mockedRoute.mock.calls[0][1];
+    expect(msg).not.toContain("❌ still broken");
+    expect(msg).toContain("looks fine now");
+    expect(msg).toContain("unlisted human reply");
+  });
+
   it("suppresses dispatch entirely when every reply on an authored PR is from a reviewerUser", async () => {
     const watched: WatchedPR = {
       number: 13,

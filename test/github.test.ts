@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, selectNewComments, parseMergeQueueStatus, fetchReviewThreadComments, belongsToOrg } from "../src/github.js";
-import type { IssueComment } from "../src/github.js";
+import { parseChecks, parseReviews, evaluateChecks, evaluateReviews, buildSnapshot, parseMergeQueueStatus, fetchReviewThreadComments, fetchPRFeedback, belongsToOrg } from "../src/github.js";
 import { DEFAULTS } from "../src/config.js";
 import type { ShepherdConfig, CheckStatus, ReviewData } from "../src/types.js";
 import { readFileSync } from "node:fs";
@@ -23,37 +22,6 @@ function loadFixture<T>(name: string): T {
 function makeConfig(overrides?: Partial<ShepherdConfig>): ShepherdConfig {
   return { ...JSON.parse(JSON.stringify(DEFAULTS)), ...overrides };
 }
-
-function makeComment(createdAt: string, body = "hi"): IssueComment {
-  return { author: "alice", body, createdAt, hasActionableFindings: /❌/.test(body) };
-}
-
-describe("selectNewComments", () => {
-  const comments = [
-    makeComment("2026-06-01T00:00:00Z"),
-    makeComment("2026-06-02T00:00:00Z"),
-    makeComment("2026-06-03T00:00:00Z"),
-  ];
-
-  it("returns all comments when cutoff is null (never notified)", () => {
-    expect(selectNewComments(comments, null)).toHaveLength(3);
-  });
-
-  it("returns only comments strictly newer than the cutoff", () => {
-    const result = selectNewComments(comments, "2026-06-02T00:00:00Z");
-    expect(result).toHaveLength(1);
-    expect(result[0].createdAt).toBe("2026-06-03T00:00:00Z");
-  });
-
-  it("returns empty when all comments are at or before the cutoff", () => {
-    expect(selectNewComments(comments, "2026-06-03T00:00:00Z")).toHaveLength(0);
-  });
-
-  it("preserves order (oldest-first) so the last element is the newest cursor", () => {
-    const result = selectNewComments(comments, null);
-    expect(result[result.length - 1].createdAt).toBe("2026-06-03T00:00:00Z");
-  });
-});
 
 describe("github", () => {
   describe("belongsToOrg", () => {
@@ -246,109 +214,6 @@ describe("github", () => {
       expect(result.status).toBe("approved");
     });
 
-    it("collects approvalBodies for approvals with substantive bodies (>20 chars)", () => {
-      const reviews: ReviewData[] = [
-        { author: "canary", state: "APPROVED", body: "Approved, but the retry loop swallows timeout errors.", submittedAt: "2026-06-15T19:00:00Z" },
-        { author: "alice", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:01:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("approved");
-      expect(result.approvalBodies).toEqual([
-        { reviewer: "canary", body: "Approved, but the retry loop swallows timeout errors.", submittedAt: "2026-06-15T19:00:00Z" },
-      ]);
-    });
-
-    it("ignores whitespace-padded trivial approval bodies", () => {
-      const reviews: ReviewData[] = [
-        { author: "alice", state: "APPROVED", body: "   LGTM   \n\n          ", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("approved");
-      expect(result.approvalBodies).toEqual([]);
-    });
-
-    it("only considers the latest review per author for approvalBodies", () => {
-      const reviews: ReviewData[] = [
-        { author: "canary", state: "APPROVED", body: "Older approval with a long substantive body.", submittedAt: "2026-06-15T18:00:00Z" },
-        { author: "canary", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("approved");
-      expect(result.approvalBodies).toEqual([]);
-    });
-
-    it("collects commentedBodies for COMMENTED reviews with substantive bodies (>20 chars)", () => {
-      const reviews: ReviewData[] = [
-        { author: "matt", state: "COMMENTED", body: "A few concerns about the enum validation path.", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("pending");
-      expect(result.commentedBodies).toEqual([
-        { reviewer: "matt", body: "A few concerns about the enum validation path.", submittedAt: "2026-06-15T19:00:00Z" },
-      ]);
-    });
-
-    it("ignores trivial COMMENTED bodies (<=20 chars)", () => {
-      const reviews: ReviewData[] = [
-        { author: "matt", state: "COMMENTED", body: "nice", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.commentedBodies).toEqual([]);
-    });
-
-    it("surfaces commentedBodies alongside an approval from another author", () => {
-      const config = makeConfig({ requiredApprovals: 1 });
-      const reviews: ReviewData[] = [
-        { author: "alice", state: "APPROVED", body: "LGTM", submittedAt: "2026-06-15T19:00:00Z" },
-        { author: "matt", state: "COMMENTED", body: "Approving-adjacent, but check the timeout branch.", submittedAt: "2026-06-15T19:01:00Z" },
-      ];
-      const result = evaluateReviews(reviews, config);
-      expect(result.status).toBe("approved");
-      expect(result.commentedBodies).toEqual([
-        { reviewer: "matt", body: "Approving-adjacent, but check the timeout branch.", submittedAt: "2026-06-15T19:01:00Z" },
-      ]);
-    });
-
-    it("surfaces commentedBodies alongside a change request from another author", () => {
-      const reviews: ReviewData[] = [
-        { author: "bob", state: "CHANGES_REQUESTED", body: "Blocking on the missing guard.", submittedAt: "2026-06-15T19:00:00Z" },
-        { author: "matt", state: "COMMENTED", body: "Non-blocking, but the naming here is confusing.", submittedAt: "2026-06-15T19:01:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("changes_requested");
-      expect(result.commentedBodies).toEqual([
-        { reviewer: "matt", body: "Non-blocking, but the naming here is confusing.", submittedAt: "2026-06-15T19:01:00Z" },
-      ]);
-    });
-
-    it("only considers the latest review per author for commentedBodies", () => {
-      const reviews: ReviewData[] = [
-        { author: "matt", state: "COMMENTED", body: "An earlier substantive comment review body.", submittedAt: "2026-06-15T18:00:00Z" },
-        { author: "matt", state: "APPROVED", body: "LGTM now", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.commentedBodies).toEqual([]);
-    });
-
-    it("returns empty approvalBodies when changes are requested", () => {
-      const reviews: ReviewData[] = [
-        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
-        { author: "bob", state: "CHANGES_REQUESTED", body: "No", submittedAt: "2026-06-15T19:01:00Z" },
-      ];
-      const result = evaluateReviews(reviews, makeConfig());
-      expect(result.status).toBe("changes_requested");
-      expect(result.approvalBodies).toEqual([]);
-    });
-
-    it("returns empty approvalBodies while approvals are below threshold", () => {
-      const config = makeConfig({ requiredApprovals: 2 });
-      const reviews: ReviewData[] = [
-        { author: "canary", state: "APPROVED", body: "Approved but please tighten null handling in parse().", submittedAt: "2026-06-15T19:00:00Z" },
-      ];
-      const result = evaluateReviews(reviews, config);
-      expect(result.status).toBe("pending");
-      expect(result.approvalBodies).toEqual([]);
-    });
   });
 
   describe("buildSnapshot", () => {
@@ -417,6 +282,39 @@ describe("github", () => {
       expect(comments).toHaveLength(2);
       expect(comments.map((c) => c.id)).toEqual([100, 101]);
       expect(comments[1].inReplyToId).toBe(100);
+    });
+  });
+  describe("fetchPRFeedback", () => {
+    it("merges reviews, issue comments and inline comments across pages, oldest first, with surface-scoped keys", () => {
+      const page = (items: unknown[]) => JSON.stringify([items]) as unknown as ReturnType<typeof execFileSync>;
+      mockedExec
+        .mockReturnValueOnce(
+          page([
+            { id: 7, user: { login: "jb" }, state: "APPROVED", body: "finding", submitted_at: "2026-10-06T00:29:44Z" },
+            { id: 8, user: { login: "jb" }, state: "PENDING", body: "draft", submitted_at: null },
+            { id: 9, user: null, state: "COMMENTED", body: "ghost", submitted_at: "2026-10-06T00:00:00Z" },
+          ]),
+        ) // pulls/{n}/reviews
+        .mockReturnValueOnce(page([{ id: 7, user: { login: "zach" }, body: "issue c", created_at: "2026-10-06T00:10:00Z" }])) // issues/{n}/comments
+        .mockReturnValueOnce(
+          page([
+            { id: 7, user: { login: "ian" }, body: "root", created_at: "2026-10-06T00:20:00Z", path: "src/a.ts", line: null, original_line: 12 },
+            { id: 11, in_reply_to_id: 7, user: { login: "ian" }, body: "reply", created_at: "2026-10-06T00:40:00Z", path: "src/a.ts", line: 14 },
+          ]),
+        ); // pulls/{n}/comments
+
+      const items = fetchPRFeedback(42, "acme/widgets");
+
+      expect(items.map((i) => i.key)).toEqual(["comment:7", "inline:7", "review:7", "inline:11"]);
+      expect(items[1]).toMatchObject({ kind: "inline", path: "src/a.ts", line: 12, threadId: 7 });
+      expect(items[2]).toMatchObject({ kind: "review", verdict: "APPROVED", author: "jb" });
+      expect(items[3]).toMatchObject({ line: 14, threadId: 7 });
+      const paths = mockedExec.mock.calls.slice(-3).map((c) => (c[1] as string[])[1]);
+      expect(paths).toEqual([
+        "repos/acme/widgets/pulls/42/reviews?per_page=100",
+        "repos/acme/widgets/issues/42/comments?per_page=100",
+        "repos/acme/widgets/pulls/42/comments?per_page=100",
+      ]);
     });
   });
 });

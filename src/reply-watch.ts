@@ -7,6 +7,7 @@ import { appendEvent } from "./events.js";
 import { readCache } from "./state-cache.js";
 import { isTerminal } from "./state-machine.js";
 import { createLogger } from "./log.js";
+import { isForwardableFeedback } from "./feedback.js";
 import type { ShepherdConfig, ReplyWatchRecord } from "./types.js";
 import type { ReviewThreadComment } from "./github.js";
 
@@ -63,10 +64,11 @@ export function findNewReplies(
 }
 
 // authored: true when this target was sourced from the authored-PR state
-// cache. daemon.ts's reviewer-comment stream (handleReviewerComments) already
-// forwards every inline comment from config.reviews.reviewerUsers on authored
-// PRs; reply-watch scanning the same PRs would double-dispatch those replies,
-// so authored targets filter them out before dispatch.
+// cache. On authored PRs the unified feedback forwarder (src/feedback.ts) owns
+// every inline comment that passes its sender filter (isForwardableFeedback),
+// whether or not it is a reply in one of our threads. Reply-watch drops those
+// replies on authored targets and keeps only the ones the forwarder would not
+// deliver, so no comment is sent twice.
 type ReplyTarget = { number: number; repo: string; title: string; url: string; authored: boolean };
 
 function replyWatchPath(dataDir: string): string {
@@ -157,8 +159,8 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
       });
     }
 
-    // Runs second so authored targets win when a PR is in both populations —
-    // the authored-PR stream owns whitelisted reviewer comments on that PR.
+    // Runs second so authored targets win when a PR is in both populations:
+    // the unified feedback forwarder owns listed senders' comments on it.
     for (const pr of readCache(config.dataDir)) {
       if (isTerminal(pr.state)) continue;
       if (config.github.ignoreRepos.includes(pr.repo)) continue;
@@ -176,8 +178,6 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
     const byKey = new Map(state.map((r) => [`${r.repo}#${r.number}`, r]));
     const next: ReplyWatchRecord[] = [];
     let updated = false;
-
-    const reviewerUsers = new Set((config.reviews.reviewerUsers ?? []).map((u) => u.toLowerCase()));
 
     for (const [key, target] of targets) {
       const existing = byKey.get(key);
@@ -205,11 +205,10 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
         let replies = findNewReplies(comments, githubUser, record.lastReplyNotifiedAt);
         if (replies.length === 0) continue;
 
-        // The reviewer-comment stream in daemon.ts owns whitelisted
-        // reviewers' comments on authored PRs; reply-watch would
-        // double-dispatch them if it forwarded the same replies here.
+        // The unified feedback forwarder owns these replies on authored PRs;
+        // forwarding them here too would deliver them twice.
         if (target.authored) {
-          replies = replies.filter((r) => !reviewerUsers.has(r.author.toLowerCase()));
+          replies = replies.filter((r) => !isForwardableFeedback(r, config));
           if (replies.length === 0) continue;
         }
 

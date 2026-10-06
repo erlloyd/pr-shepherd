@@ -44,12 +44,20 @@ export type WatchedPR = {
   headSha: string | null;
   lastCheckedAt: string | null;
   lastEventAt: string | null;
-  lastBotCommentNotifiedAt: string | null;
+  // Number of forwards that carried listed-bot feedback; capped at
+  // botFeedback.maxAttempts.
   botFeedbackCount: number;
-  lastReviewerCommentNotifiedAt: string | null;
-  lastReviewerReviewCommentNotifiedAt: string | null;
-  lastCommentedReviewNotifiedAt: string | null;
-  lastConflictNotifiedAt: string | null;
+  // Keys (FeedbackItem.key) of every feedback item already forwarded or
+  // deliberately skipped at rollout. Absent on cache entries written before
+  // unified forwarding; the forwarder seeds it from the legacy cursors below.
+  forwardedFeedbackIds?: string[];
+  lastConflictNotifiedAt?: string | null;
+  // Legacy per-surface cursors from before unified forwarding. No longer
+  // written; read once to seed forwardedFeedbackIds (see src/feedback.ts).
+  lastBotCommentNotifiedAt?: string | null;
+  lastReviewerCommentNotifiedAt?: string | null;
+  lastReviewerReviewCommentNotifiedAt?: string | null;
+  lastCommentedReviewNotifiedAt?: string | null;
 };
 
 export type PREventRecord = {
@@ -67,12 +75,6 @@ export type CheckStatus = {
   state: string;
   bucket: "pass" | "fail" | "pending" | "skipping" | "cancel";
   workflow: string;
-};
-
-export type ApprovalFeedback = {
-  reviewer: string;
-  body: string;
-  submittedAt: string;
 };
 
 export type ReviewData = {

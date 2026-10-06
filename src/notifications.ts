@@ -1,12 +1,14 @@
 import { routeToAgent } from "./ateam-conductor.js";
-import type { ApprovalFeedback, ShepherdConfig } from "./types.js";
+import type { ShepherdConfig } from "./types.js";
 
+// Resolves true when the message reached ateam (or was a dry-run no-op).
+// Callers that dedup by a cursor must only advance it on true.
 export async function sendToAgent(
   config: ShepherdConfig,
   targetAgent: string,
   message: string,
-): Promise<void> {
-  routeToAgent(config, message);
+): Promise<boolean> {
+  return routeToAgent(config, message);
 }
 
 export async function postWebhook(
@@ -46,29 +48,17 @@ export function formatCIFailureMessage(
   ].join("\n");
 }
 
-export function formatReviewMessage(
+// Status only: the review body (and any inline comments) reach the agent via
+// the unified feedback forwarder, so embedding it here would send it twice.
+export function formatChangesRequestedMessage(
   prNumber: number,
   repo: string,
   reviewer: string,
-  state: string,
-  body: string,
 ): string {
-  const action =
-    state === "CHANGES_REQUESTED" ? "Changes Requested" : "Review Comment";
-  const footer =
-    state === "CHANGES_REQUESTED"
-      ? "Please address the feedback and push a fix."
-      : state === "COMMENTED"
-        ? "Review feedback left as a comment review (not a formal approval or change request). Review it and address anything actionable."
-        : "FYI — review comment posted.";
   return [
-    `[PR Shepherd] PR #${prNumber} (${repo}) — ${action}`,
+    `[PR Shepherd] PR #${prNumber} (${repo}) — Changes Requested by @${reviewer}`,
     "",
-    `Reviewer: ${reviewer}`,
-    "",
-    body,
-    "",
-    footer,
+    "Review feedback is delivered in separate feedback messages. Address it and push a fix.",
   ].join("\n");
 }
 
@@ -110,16 +100,10 @@ export function formatApprovalMessage(
   repo: string,
   approvals: number,
   autoMerge: boolean,
-  approvalBodies: ApprovalFeedback[] = [],
 ): string {
+  // Approval review bodies are forwarded by the unified feedback forwarder.
   const head = `[PR Shepherd] PR #${prNumber} (${repo}) — Approved (${approvals} approval${approvals !== 1 ? "s" : ""}).`;
-  const msg = autoMerge
+  return autoMerge
     ? `${head} Enabling auto-merge.`
     : `🚩 ${head} Ready to merge — auto-merge is disabled, so merge it yourself when you're ready.`;
-  if (approvalBodies.length === 0) return msg;
-
-  const feedback = approvalBodies
-    .map((r) => `**${r.reviewer}** (approved with feedback):\n${r.body}`)
-    .join("\n\n---\n\n");
-  return `${msg}\n\nHowever, reviewers left feedback that should still be addressed:\n\n${feedback}`;
 }
