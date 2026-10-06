@@ -10,7 +10,8 @@ Two watch loops run on a configurable interval (default: 3 minutes):
 
 1. **Authored PR monitoring** — polls GitHub for open non-draft PRs by a configured author. For each PR, checks CI status, reviews, and merge state. On state transitions:
    - **CI fails** → routes a `ci_failed` event to `ateam route-pr-event`
-   - **Reviewer requests changes** → routes a `changes_requested` event with the full review body
+   - **Reviewer requests changes** → routes a `changes_requested` status event (the review body comes through the feedback forwarder)
+   - **New review feedback** (any state) → formal review bodies of every verdict from anyone but the author, plus PR comments and inline comments from `reviews.reviewerUsers` (and `❌` findings from `reviews.botUsers`), are forwarded exactly once
    - **All approvals received** → enables auto-merge via `gh pr merge --auto --squash`
    - **Branch behind base with auto-merge enabled** → runs `gh pr update-branch` to bring it up to date, then monitors CI until the merge completes. Repeats every poll cycle until merged.
    - **Merge conflicts with auto-merge enabled** → routes an escalation event (cannot auto-resolve)
@@ -166,7 +167,9 @@ Three layers, in priority order:
 | `github.authorUsername` | **required** | GitHub username whose PRs to watch |
 | `github.defaultRepo` | null | Default repo for CLI commands |
 | `reviews.ignoreUsers` | [] | Usernames whose reviews are ignored entirely |
-| `reviews.botUsers` | [] | Usernames that are bots (logging context only — processed identically to human reviews) |
+| `reviews.reviewerUsers` | [] | Human reviewers whose PR comments and inline comments are forwarded to the agent (formal review bodies are forwarded from anyone but the author) |
+| `reviews.botUsers` | [] | Bots whose PR comments and inline comments are forwarded, only when they contain `❌` |
+| `botFeedback.maxAttempts` | 2 | Maximum number of forwards per PR that carry a bot's comment feedback |
 | `checks.requiredChecks` | [] | If set, only these checks must pass. If empty, all non-skipped checks must pass |
 | `checks.ignoreChecks` | [] | Check names to skip when evaluating CI |
 | `notifications.webhookUrl` | null | Incoming webhook URL for chat notifications (Slack/Discord/Teams) |

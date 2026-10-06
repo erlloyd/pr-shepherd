@@ -9,8 +9,6 @@ import {
   evaluateReviews,
   enableAutoMerge,
   updateBranch,
-  fetchCommentsByUsers,
-  selectNewComments,
   fetchMergeQueueStatus,
   belongsToOrg,
 } from "./github.js";
@@ -23,17 +21,18 @@ import { createLogger } from "./log.js";
 import { pollReviewInbox } from "./review-inbox.js";
 import { pollReviewFollowUps } from "./review-followup.js";
 import { pollReplyWatch } from "./reply-watch.js";
+import { forwardFeedback } from "./feedback.js";
 import { pollReviewerNudges, registerNudge } from "./reviewer-nudge.js";
 import {
   formatCIFailureMessage,
-  formatReviewMessage,
+  formatChangesRequestedMessage,
   formatApprovalMessage,
   formatMergeMessage,
   formatStaleMessage,
   formatMergeQueueEnteredMessage,
   formatMergeQueueLeftMessage,
 } from "./notifications.js";
-import type { ApprovalFeedback, ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
+import type { ShepherdConfig, WatchedPR, PREvent, PRState, PREventRecord } from "./types.js";
 
 const log = createLogger("daemon");
 
@@ -134,15 +133,13 @@ async function handleTransition(
       }
       case "CHANGES_REQUESTED": {
         const reviewer = (details.reviewer as string) ?? "unknown";
-        const body = (details.body as string) ?? "";
-        const msg = formatReviewMessage(pr.number, pr.repo, reviewer, "CHANGES_REQUESTED", body);
+        const msg = formatChangesRequestedMessage(pr.number, pr.repo, reviewer);
         if (!config.dryRun) await sendToAgent(config, agent, msg);
         break;
       }
       case "APPROVED": {
         const approvals = (details.approvals as number) ?? 0;
-        const approvalBodies = (details.approvalBodies as ApprovalFeedback[]) ?? [];
-        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge, approvalBodies);
+        const msg = formatApprovalMessage(pr.number, pr.repo, approvals, config.autoMerge);
         if (config.autoMerge) {
           log.info(`Enabling auto-merge for PR #${pr.number}`);
           if (!config.dryRun) {
@@ -178,120 +175,6 @@ async function handleTransition(
   } catch (err) {
     log.error(`Error handling ${toState} for PR #${pr.number}: ${(err as Error).message}`);
   }
-}
-
-// Surface new actionable (❌) findings from configured review bots. Capped at
-// botFeedback.maxAttempts so a stuck PR doesn't notify forever. Returns true if
-// new feedback was found (whether or not it was sent — dry-run reports without
-// consuming the cursor). Mutates + persists pr on a real (non-dry) run.
-async function handleBotComments(config: ShepherdConfig, pr: WatchedPR): Promise<boolean> {
-  if (pr.botFeedbackCount >= config.botFeedback.maxAttempts) {
-    log.debug(`PR #${pr.number} — bot feedback limit reached (${config.botFeedback.maxAttempts}), ignoring further bot findings.`);
-    return false;
-  }
-  const comments = fetchCommentsByUsers(pr.number, pr.repo, config.reviews.botUsers);
-  const newActionable = selectNewComments(comments, pr.lastBotCommentNotifiedAt).filter(
-    (c) => c.hasActionableFindings,
-  );
-  if (newActionable.length === 0) return false;
-
-  for (const comment of newActionable) {
-    const msg = [
-      `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Bot Review Feedback (attempt ${pr.botFeedbackCount + 1}/${config.botFeedback.maxAttempts})`,
-      "",
-      `Bot: ${comment.author}`,
-      "",
-      comment.body,
-      "",
-      "This bot review has actionable findings (❌) that need to be addressed before the PR can be approved.",
-    ].join("\n");
-    log.info(`Bot feedback from ${comment.author} on PR #${pr.number} (attempt ${pr.botFeedbackCount + 1}/${config.botFeedback.maxAttempts})`);
-    if (!config.dryRun) {
-      await sendToAgent(config, config.notifications.notifyAgent!, msg);
-    }
-  }
-
-  if (!config.dryRun) {
-    pr.botFeedbackCount++;
-    pr.lastBotCommentNotifiedAt = newActionable[newActionable.length - 1].createdAt;
-    upsertCachedPR(config.dataDir, pr);
-  }
-  return true;
-}
-
-// Surface new PR comments from whitelisted human reviewers. Unlike bots, every
-// comment is forwarded (humans don't use the ❌ convention) and there is no
-// attempt cap — dedup is purely by the lastReviewerCommentNotifiedAt cursor.
-async function handleReviewerComments(config: ShepherdConfig, pr: WatchedPR): Promise<boolean> {
-  // Two independent comment streams with separate cursors: PR conversation
-  // comments and inline diff-thread review comments. A reviewer's actionable
-  // feedback often lands inline on an approving review, so both must be scanned.
-  const issueComments = selectNewComments(
-    fetchCommentsByUsers(pr.number, pr.repo, config.reviews.reviewerUsers, "issue"),
-    pr.lastReviewerCommentNotifiedAt,
-  );
-  const reviewComments = selectNewComments(
-    fetchCommentsByUsers(pr.number, pr.repo, config.reviews.reviewerUsers, "review"),
-    pr.lastReviewerReviewCommentNotifiedAt,
-  );
-  if (issueComments.length === 0 && reviewComments.length === 0) return false;
-
-  for (const comment of [...issueComments, ...reviewComments]) {
-    const msg = [
-      `[PR Shepherd] PR #${pr.number} (${pr.repo}) — Reviewer Comment from @${comment.author}`,
-      "",
-      comment.body,
-    ].join("\n");
-    log.info(`Reviewer comment from @${comment.author} on PR #${pr.number}`);
-    if (!config.dryRun) {
-      await sendToAgent(config, config.notifications.notifyAgent!, msg);
-    }
-  }
-
-  if (!config.dryRun) {
-    if (issueComments.length > 0) {
-      pr.lastReviewerCommentNotifiedAt = issueComments[issueComments.length - 1].createdAt;
-    }
-    if (reviewComments.length > 0) {
-      pr.lastReviewerReviewCommentNotifiedAt =
-        reviewComments[reviewComments.length - 1].createdAt;
-    }
-    upsertCachedPR(config.dataDir, pr);
-  }
-  return true;
-}
-
-// Forward substantive COMMENTED-verdict review bodies (from evaluateReviews) to
-// the agent. These live at pulls/{n}/reviews — a surface handleReviewerComments
-// (issue + inline-thread comments) never scans, and evaluateReviews buckets only
-// APPROVED/CHANGES_REQUESTED, so without this a comment review reaches no one.
-// Deduped by a submittedAt cursor because a formal review persists across every
-// poll; a missing cursor (existing cache entries) forwards current ones once.
-async function forwardCommentedReviews(
-  config: ShepherdConfig,
-  pr: WatchedPR,
-  commentedBodies: ApprovalFeedback[],
-): Promise<boolean> {
-  const cursor = pr.lastCommentedReviewNotifiedAt;
-  const fresh = commentedBodies.filter((r) => !cursor || r.submittedAt > cursor);
-  if (fresh.length === 0) return false;
-
-  for (const review of fresh) {
-    const msg = formatReviewMessage(pr.number, pr.repo, review.reviewer, "COMMENTED", review.body);
-    log.info(`Comment review from @${review.reviewer} on PR #${pr.number}`);
-    if (!config.dryRun) {
-      await sendToAgent(config, config.notifications.notifyAgent!, msg);
-    }
-  }
-
-  if (!config.dryRun) {
-    pr.lastCommentedReviewNotifiedAt = fresh.reduce(
-      (latest, r) => (r.submittedAt > latest ? r.submittedAt : latest),
-      cursor ?? "",
-    );
-    upsertCachedPR(config.dataDir, pr);
-  }
-  return true;
 }
 
 // Handles a live PR view showing MERGED/CLOSED, whatever our cached state.
@@ -398,15 +281,6 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
           await handleTransition(config, pr, "CI_FAILED", details);
         }
       }
-
-      // Reviews often arrive while CI is still running, and a slow or on-demand
-      // check can hold a PR here for its whole review window. If CI just settled
-      // above, the CI_FAILED or CI_PASSED block below forwards comments instead.
-      if (pr.state === "CI_PENDING") {
-        await handleBotComments(config, pr);
-        await handleReviewerComments(config, pr);
-        await forwardCommentedReviews(config, pr, evaluateReviews(reviews, config).commentedBodies);
-      }
     }
 
     if (pr.state === "CI_FAILED") {
@@ -416,16 +290,6 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       const checkResult = evaluateChecks(checks, config);
       if (checkResult.status === "pass") {
         tryTransition(config, pr, "ci_passed");
-      }
-
-      // Review feedback must still reach the agent while CI is red — the two
-      // aren't mutually exclusive. Comment forwarding is state-neutral (own
-      // cursors), so it's safe here without a state change. If CI just
-      // recovered above, the CI_PASSED block below handles comments instead.
-      if (pr.state === "CI_FAILED") {
-        await handleBotComments(config, pr);
-        await handleReviewerComments(config, pr);
-        await forwardCommentedReviews(config, pr, evaluateReviews(reviews, config).commentedBodies);
       }
     }
 
@@ -469,10 +333,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       if (fetchMergeQueueStatus(pr.number, pr.repo)) {
         if (pr.state === "AWAITING_REVIEW" || pr.state === "STALE") {
           const reviewResult = evaluateReviews(reviews, config);
-          const details = {
-            approvals: reviewResult.approvals,
-            approvalBodies: reviewResult.approvalBodies,
-          };
+          const details = { approvals: reviewResult.approvals };
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
         }
@@ -511,31 +372,17 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
       } else {
       const reviewResult = evaluateReviews(reviews, config);
 
-      // Comment reviews are orthogonal to the approve/change-request/pending
-      // status, so forward them before the status chain regardless of branch.
-      await forwardCommentedReviews(config, pr, reviewResult.commentedBodies);
-
       if (reviewResult.status === "changes_requested") {
         const reviewer = reviewResult.changesRequested[0];
-        const details = { reviewer: reviewer.author, body: reviewer.body };
+        const details = { reviewer: reviewer.author };
         tryTransition(config, pr, "changes_requested", details);
         await handleTransition(config, pr, "CHANGES_REQUESTED", details);
       } else if (reviewResult.status === "approved") {
-        const details = {
-          approvals: reviewResult.approvals,
-          approvalBodies: reviewResult.approvalBodies,
-        };
+        const details = { approvals: reviewResult.approvals };
         if (prView.autoMergeRequest) {
+          // Auto-merge is already on, so there is nothing to enable or flag.
           tryTransition(config, pr, "all_approved", details);
           tryTransition(config, pr, "auto_merge_enabled");
-          // Auto-merge is already on, so the usual APPROVED handling is
-          // skipped — but an approval that carries feedback (e.g. a bot
-          // approving with warnings) must still reach the agent. This runs
-          // only on the poll that consumes the state change out of
-          // CI_PASSED/AWAITING_REVIEW/STALE, so it fires once.
-          if (reviewResult.approvalBodies.length > 0) {
-            await handleTransition(config, pr, "APPROVED", details);
-          }
         } else {
           tryTransition(config, pr, "all_approved", details);
           await handleTransition(config, pr, "APPROVED", details);
@@ -544,16 +391,7 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
         if (reviews.length > 0) {
           tryTransition(config, pr, "review_posted");
         }
-
-        const botNotified = await handleBotComments(config, pr);
-        const reviewerNotified = await handleReviewerComments(config, pr);
-        if (pr.state === "CI_PASSED" && (botNotified || reviewerNotified)) {
-          tryTransition(config, pr, "review_posted");
-        }
       } else if (pr.state === "AWAITING_REVIEW") {
-        await handleBotComments(config, pr);
-        await handleReviewerComments(config, pr);
-
         const staleHours =
           (Date.now() - new Date(pr.lastEventAt ?? now()).getTime()) /
           (1000 * 60 * 60);
@@ -563,6 +401,23 @@ export async function pollPR(config: ShepherdConfig, pr: WatchedPR): Promise<voi
           await handleTransition(config, pr, "STALE", details);
         }
       }
+      }
+    }
+
+    // Feedback forwarding is state-neutral: one path, every watched state,
+    // deduped per item (src/feedback.ts). It runs after the state handling so
+    // a status message (e.g. changes requested) precedes the bodies it refers
+    // to. A fetch failure must not cost the rest of this poll.
+    if (!isTerminal(pr.state)) {
+      let forwarded = 0;
+      try {
+        forwarded = await forwardFeedback(config, pr);
+      } catch (err) {
+        log.error(`Feedback forwarding failed for PR #${pr.number} (${pr.repo}): ${(err as Error).message}`);
+      }
+      // Feedback on a CI_PASSED PR means review has started.
+      if (forwarded > 0 && pr.state === "CI_PASSED") {
+        tryTransition(config, pr, "review_posted");
       }
     }
 
@@ -600,11 +455,8 @@ export async function pollAll(config: ShepherdConfig): Promise<number> {
       headSha: null,
       lastCheckedAt: null,
       lastEventAt: null,
-      lastBotCommentNotifiedAt: null,
       botFeedbackCount: 0,
-      lastReviewerCommentNotifiedAt: null,
-      lastReviewerReviewCommentNotifiedAt: null,
-      lastCommentedReviewNotifiedAt: null,
+      forwardedFeedbackIds: [],
       lastConflictNotifiedAt: null,
     };
 

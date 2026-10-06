@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { ApprovalFeedback, CheckStatus, ReviewData, PRSnapshot, ShepherdConfig } from "./types.js";
+import type { CheckStatus, ReviewData, PRSnapshot, ShepherdConfig } from "./types.js";
 
 type RawCheck = {
   name: string;
@@ -140,22 +140,16 @@ export type IssueComment = {
   hasActionableFindings: boolean;
 };
 
-// kind selects the GitHub endpoint: "issue" = PR conversation comments
-// (issues/{n}/comments), "review" = inline diff-thread review comments
-// (pulls/{n}/comments). Both return the same {user, body, created_at} shape.
+// PR conversation comments (issues/{n}/comments) by the given users. Used by
+// the review inbox's waitForBot gate; authored-PR feedback uses fetchPRFeedback.
 export function fetchCommentsByUsers(
   number: number,
   repo: string,
   users: string[],
-  kind: "issue" | "review" = "issue",
 ): IssueComment[] {
   if (users.length === 0) return [];
   const [owner, name] = repo.split("/");
-  const path =
-    kind === "review"
-      ? `repos/${owner}/${name}/pulls/${number}/comments`
-      : `repos/${owner}/${name}/issues/${number}/comments`;
-  const json = gh(["api", path, "--jq", "."]);
+  const json = gh(["api", `repos/${owner}/${name}/issues/${number}/comments`, "--jq", "."]);
   const comments = JSON.parse(json) as Array<{
     user: { login: string };
     body: string;
@@ -173,13 +167,67 @@ export function fetchCommentsByUsers(
     }));
 }
 
-// Comments newer than the last-notified cursor, oldest-first. cutoff null = never notified.
-export function selectNewComments(
-  comments: IssueComment[],
-  cutoff: string | null,
-): IssueComment[] {
-  const since = cutoff ?? "1970-01-01T00:00:00Z";
-  return comments.filter((c) => c.createdAt > since);
+// One piece of feedback text on a PR, from any of the three surfaces GitHub
+// stores it on. `key` is unique across surfaces (the three id spaces are
+// separate tables, so the surface is part of the key) and is what the unified
+// forwarder dedups on.
+export type FeedbackItem = {
+  key: string;
+  kind: "review" | "comment" | "inline";
+  id: number;
+  author: string;
+  body: string;
+  createdAt: string;
+  // Formal reviews only: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, ...
+  verdict: string | null;
+  // Inline comments only. threadId is the thread root (what in_reply_to takes).
+  path: string | null;
+  line: number | null;
+  threadId: number | null;
+};
+
+type RawUser = { login: string } | null;
+
+function ghPages<T>(path: string): T[] {
+  const json = gh(["api", `${path}?per_page=100`, "--paginate", "--slurp"]);
+  return (JSON.parse(json) as T[][]).flat();
+}
+
+// Every formal review, PR conversation comment, and inline review comment on a
+// PR, oldest first. Deleted ("ghost") users come back as user: null and
+// unsubmitted reviews have no submitted_at; both are dropped.
+export function fetchPRFeedback(number: number, repo: string): FeedbackItem[] {
+  const [owner, name] = repo.split("/");
+  const base = `repos/${owner}/${name}`;
+
+  type RawReviewItem = { id: number; user: RawUser; state: string; body: string | null; submitted_at: string | null };
+  type RawIssueComment = { id: number; user: RawUser; body: string | null; created_at: string };
+  type RawInline = RawIssueComment & { in_reply_to_id?: number; path: string; line?: number | null; original_line?: number | null };
+
+  const items: FeedbackItem[] = [];
+  for (const r of ghPages<RawReviewItem>(`${base}/pulls/${number}/reviews`)) {
+    if (!r.user || !r.submitted_at) continue;
+    items.push({
+      key: `review:${r.id}`, kind: "review", id: r.id, author: r.user.login, body: r.body ?? "",
+      createdAt: r.submitted_at, verdict: r.state, path: null, line: null, threadId: null,
+    });
+  }
+  for (const c of ghPages<RawIssueComment>(`${base}/issues/${number}/comments`)) {
+    if (!c.user) continue;
+    items.push({
+      key: `comment:${c.id}`, kind: "comment", id: c.id, author: c.user.login, body: c.body ?? "",
+      createdAt: c.created_at, verdict: null, path: null, line: null, threadId: null,
+    });
+  }
+  for (const c of ghPages<RawInline>(`${base}/pulls/${number}/comments`)) {
+    if (!c.user) continue;
+    items.push({
+      key: `inline:${c.id}`, kind: "inline", id: c.id, author: c.user.login, body: c.body ?? "",
+      createdAt: c.created_at, verdict: null, path: c.path,
+      line: c.line ?? c.original_line ?? null, threadId: c.in_reply_to_id ?? c.id,
+    });
+  }
+  return items.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 }
 
 export type ReviewThreadComment = {
@@ -346,8 +394,6 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   status: "approved" | "changes_requested" | "pending";
   approvals: number;
   changesRequested: ReviewData[];
-  approvalBodies: ApprovalFeedback[];
-  commentedBodies: ApprovalFeedback[];
 } {
   const latestByAuthor = new Map<string, ReviewData>();
   for (const review of reviews) {
@@ -363,26 +409,15 @@ export function evaluateReviews(reviews: ReviewData[], config: ShepherdConfig): 
   const changesRequested = latest.filter(
     (r) => r.state === "CHANGES_REQUESTED",
   );
-  const approvalBodies = approved
-    .filter((r) => r.body.trim().length > 20)
-    .map((r) => ({ reviewer: r.author, body: r.body, submittedAt: r.submittedAt }));
-
-  // Reviews submitted with the COMMENTED verdict are neither approvals nor
-  // change requests, so their bodies reach the agent through no other path.
-  // Surface substantive ones (same >20-char threshold as approval feedback)
-  // regardless of the aggregate status — a comment review can coexist with an
-  // approval or a change request from another author.
-  const commentedBodies = latest
-    .filter((r) => r.state === "COMMENTED" && r.body.trim().length > 20)
-    .map((r) => ({ reviewer: r.author, body: r.body, submittedAt: r.submittedAt }));
-
+  // Review bodies are not surfaced here: the unified feedback forwarder
+  // (src/feedback.ts) delivers every review body, of every verdict, itself.
   if (changesRequested.length > 0) {
-    return { status: "changes_requested", approvals, changesRequested, approvalBodies: [], commentedBodies };
+    return { status: "changes_requested", approvals, changesRequested };
   }
   if (approvals >= config.requiredApprovals) {
-    return { status: "approved", approvals, changesRequested: [], approvalBodies, commentedBodies };
+    return { status: "approved", approvals, changesRequested: [] };
   }
-  return { status: "pending", approvals, changesRequested: [], approvalBodies: [], commentedBodies };
+  return { status: "pending", approvals, changesRequested: [] };
 }
 
 export function buildSnapshot(

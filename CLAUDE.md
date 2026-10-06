@@ -8,12 +8,9 @@ A single long-running Node.js process with two polling loops on a shared interva
 
 1. **Authored PR monitoring** — `gh search prs --author=<user>` discovers open non-draft PRs. For each, polls CI checks, reviews, and merge state. Detects state transitions via a pure-function state machine. Actions taken automatically:
    - **CI failure** → notifies the configured agent with the list of failed checks
-   - **Review with changes requested** → sends the full review body to the agent
-   - **Bot review feedback** → for each user in `reviews.botUsers`, scans PR issue comments for actionable findings (`❌`) and forwards them to the agent. Capped at `botFeedback.maxAttempts` per PR.
-   - **Reviewer comment** → for each user in `reviews.reviewerUsers` (human whitelist), forwards their PR issue comments to the agent. Catches review feedback left as plain comments rather than a formal GitHub review. No `❌` gate, no attempt cap — deduped by a per-PR cursor.
-   - **Comment review** → a formal review submitted with the `COMMENTED` verdict (the "Comment" button, neither approve nor request-changes) has its body relayed to the agent when the body is over 20 chars. Applies to any reviewer, not just the `reviewerUsers` whitelist — like approvals and change requests, a formal review is a deliberate action. This body lives at `pulls/{n}/reviews`, a surface the reviewer-comment path (issue and inline-thread comments) never scans, so without this it reaches no one. Deduped by a per-PR `submittedAt` cursor because a formal review persists across every poll; forwarded in watched states including while CI is pending or red.
-   - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead
-   - **Approved with feedback** → approval review bodies over 20 chars (e.g. a bot approving while listing warnings) are relayed to the agent alongside the approval, including when auto-merge is already enabled
+   - **Review feedback (one path)** → every piece of feedback text on the PR goes to the agent exactly once, from a single forwarder (`src/feedback.ts`), in every watched non-terminal state. It covers all three GitHub surfaces: formal review bodies of every verdict (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`, ...), PR conversation comments, and inline review comments. The sender filter depends on the surface. Formal reviews with a non-empty body are forwarded from any sender except the PR author (`github.authorUsername`): there is no list gate, no `❌` gate, and no cap. For PR comments and inline comments, users in `reviews.reviewerUsers` are forwarded; users in `reviews.botUsers` are forwarded only when the body contains `❌`, capped at `botFeedback.maxAttempts` forwards per PR; the PR author and everyone else are not forwarded. New items in one poll go out as one message, each labeled with its kind and verdict (`APPROVED review from @x`, `comment from @x`, `inline comment from @x on path:line (thread N)`). Dedup is per item: `forwardedFeedbackIds` on the cached PR holds the key of every item already sent. An item is recorded only after delivery succeeds.
+   - **Review with changes requested** → transitions the PR and sends a status message naming the reviewer. The review body is not in this message; the feedback forwarder sends it.
+   - **All approvals met** → if `autoMerge` is true (default), enables auto-merge (`gh pr merge --auto --squash`); if false, raises a flag to the agent for manual merge instead. Approval bodies are sent by the feedback forwarder, not in the approval message.
    - **Auto-merge enabled but branch is behind** → updates the branch (`gh pr update-branch`) so CI re-runs and the merge can proceed. Repeats every poll until the PR merges. Skipped when `mergeQueue.enabled` — the queue rebases queued PRs itself.
    - **Merge conflicts** → escalates to the agent once per conflict, in any watched state (deduped via `lastConflictNotifiedAt`; reset when the conflict clears)
    - **Entered merge queue** (if `mergeQueue.enabled`) → sends an informational notice, no action needed
@@ -32,7 +29,7 @@ A single long-running Node.js process with two polling loops on a shared interva
 
 3. **Review follow-up** — tracks PRs where we left `CHANGES_REQUESTED` reviews. When the author pushes new commits, notifies the agent for a scoped re-review (only check previously raised issues, no new findings). Stops on approval.
 
-4. **Reply watch** — scans inline review-comment threads on PRs we reviewed (`gh search prs --reviewed-by`) and our watched authored PRs. When someone replies in a thread our identity participated in (newer than our last comment in that thread), forwards the reply to the owning initiative via `--transition comment_reply`: an open initiative gets mail; a closed review initiative is reopened and its session relaunched in comment-reply mode to respond in-thread; no initiative → dropped. Cursor per PR in `data/reply-watch.json`. New PRs are seeded at first discovery — no historical backfill; only replies after discovery dispatch.
+4. **Reply watch** — scans inline review-comment threads on PRs we reviewed (`gh search prs --reviewed-by`) and our watched authored PRs. On authored PRs the feedback forwarder owns every reply that passes its inline-comment sender filter (`isForwardableFeedback`), so reply-watch drops those and forwards only the rest (for example, a reply from a user who is not listed). When someone replies in a thread our identity participated in (newer than our last comment in that thread), forwards the reply to the owning initiative via `--transition comment_reply`: an open initiative gets mail; a closed review initiative is reopened and its session relaunched in comment-reply mode to respond in-thread; no initiative → dropped. Cursor per PR in `data/reply-watch.json`. New PRs are seeded at first discovery — no historical backfill; only replies after discovery dispatch.
 
 5. **Reviewer nudge** — when a worker pushes fixes on an authored PR that had `CHANGES_REQUESTED` reviews, posts a GitHub @mention to the reviewer. Escalates to the agent after configurable hours (business days only) if no response.
 
@@ -46,6 +43,7 @@ Communication is via HTTP POST to a conductor MCP endpoint (`send_to_agent`). If
 | `src/state-machine.ts` | Pure transition function: `(state, event) → newState` |
 | `src/state-cache.ts` | JSON file persistence for PR state between polls |
 | `src/github.ts` | `gh` CLI wrapper — checks, reviews, PR state, auto-merge, branch updates |
+| `src/feedback.ts` | Unified review-feedback forwarder: sender filter, per-item dedup, rollout seeding |
 | `src/review-inbox.ts` | Review assignment detection + dedup + already-reviewed filter |
 | `src/reply-watch.ts` | Inline review-comment thread scan + reply dispatch |
 | `src/notifications.ts` | Sends messages via conductor MCP or logs to stdout |
@@ -69,6 +67,10 @@ Key loops:
 - **Stale**: `AWAITING_REVIEW` past threshold → `STALE` → agent notified
 
 Terminal states: `MERGED`, `CLOSED` (reachable from any non-terminal state).
+
+### Feedback rollout seeding
+
+Cache entries written before unified forwarding have no `forwardedFeedbackIds`. On their first poll the forwarder seeds the set: items at or before a seed time are recorded as already handled, and newer items are forwarded. The seed time is the latest legacy comment cursor (`lastCommentedReviewNotifiedAt`, `lastReviewerCommentNotifiedAt`, `lastReviewerReviewCommentNotifiedAt`, `lastBotCommentNotifiedAt`). If none is set, the seed time is `lastEventAt`. A newly discovered PR starts with an empty set, so all of its existing feedback is forwarded once. The legacy cursors are no longer written.
 
 The daemon also detects when auto-merge was enabled externally (e.g., by a previous run or manually on GitHub) by checking the `autoMergeRequest` field — it transitions `APPROVED → AUTO_MERGE_ENABLED` automatically.
 
@@ -107,7 +109,7 @@ at `warn` level instead of `info`.
 ## Tests
 
 ```bash
-npm test            # 268 tests across 11 files
+npm test            # 290 tests across 12 files
 npm run typecheck   # Clean TypeScript check
 ```
 
@@ -115,7 +117,7 @@ State machine has 81 tests covering every transition, terminal state, and full l
 
 ## Data Files (gitignored)
 
-- `data/pr-state-cache.json` — last-known state per discovered PR
+- `data/pr-state-cache.json` — last-known state per discovered PR, including the `forwardedFeedbackIds` dedup set
 - `data/pr-events.jsonl` — append-only audit log
 - `data/review-inbox.json` — already-notified review assignments (dedup)
 - `data/reply-watch.json` — per-PR last-comment cursors for reply-watch threads
