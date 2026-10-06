@@ -5,12 +5,18 @@ import type { ShepherdConfig } from "../src/types.js";
 // Mock node:child_process so execFileSync never shells out
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
+  spawnSync: vi.fn(),
 }));
 
 // Import the module under test AFTER mocking so it picks up the mock
 const { routeToAgent, reapClosedReviews } = await import("../src/ateam-conductor.js");
-const { execFileSync } = await import("node:child_process");
+const { execFileSync, spawnSync } = await import("node:child_process");
 const mockedExec = vi.mocked(execFileSync);
+const mockedSpawn = vi.mocked(spawnSync);
+
+function spawnResult(r: { status?: number; stdout?: string; stderr?: string; error?: Error; signal?: string }) {
+  return { status: 0, stdout: "", stderr: "", ...r } as unknown as ReturnType<typeof spawnSync>;
+}
 
 function makeConfig(overrides?: Partial<ShepherdConfig>): ShepherdConfig {
   return {
@@ -58,6 +64,7 @@ describe("ateam-conductor", () => {
     delete process.env.PR_SHEPHERD_ATEAM_PATH;
     // gh head branch lookup returns "feature-x"; ateam exec returns ""
     mockedExec.mockReturnValue("feature-x\n" as unknown as ReturnType<typeof execFileSync>);
+    mockedSpawn.mockReturnValue(spawnResult({}));
   });
 
   afterEach(() => {
@@ -265,8 +272,8 @@ describe("ateam-conductor", () => {
     it("invokes ateam reap with no target", () => {
       reapClosedReviews(makeConfig());
 
-      expect(mockedExec).toHaveBeenCalledTimes(1);
-      const [bin, args] = mockedExec.mock.calls[0] as [string, string[]];
+      expect(mockedSpawn).toHaveBeenCalledTimes(1);
+      const [bin, args] = mockedSpawn.mock.calls[0] as [string, string[]];
       expect(bin).toBe("ateam");
       expect(args).toEqual(["reap"]);
     });
@@ -276,7 +283,7 @@ describe("ateam-conductor", () => {
 
       reapClosedReviews(makeConfig());
 
-      const [bin] = mockedExec.mock.calls[0] as [string, string[]];
+      const [bin] = mockedSpawn.mock.calls[0] as [string, string[]];
       expect(bin).toBe("/usr/local/bin/my-ateam");
     });
 
@@ -285,13 +292,13 @@ describe("ateam-conductor", () => {
 
       reapClosedReviews(makeConfig({ dryRun: true }));
 
-      expect(mockedExec).not.toHaveBeenCalled();
+      expect(mockedSpawn).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("[dry-run]"));
       consoleSpy.mockRestore();
     });
 
     it("logs but does not throw when ateam reap fails", () => {
-      mockedExec.mockImplementationOnce(() => { throw new Error("ateam not found"); });
+      mockedSpawn.mockReturnValueOnce(spawnResult({ error: new Error("spawnSync ateam ENOENT") }));
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       expect(() => reapClosedReviews(makeConfig())).not.toThrow();
@@ -305,7 +312,7 @@ describe("ateam-conductor", () => {
         "reap: scan summary — review=128 processed=114 already-reaped-revisited=37 sessions-torn-down=89 " +
         "worktrees-removed=76 worktrees-already-gone=21 worktrees-skipped=6 worktrees-failed=2 " +
         "grace-skipped=43 codex-skipped=59";
-      mockedExec.mockReturnValueOnce(summary as unknown as ReturnType<typeof execFileSync>);
+      mockedSpawn.mockReturnValueOnce(spawnResult({ stdout: summary }));
       const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
       // log.debug is a no-op unless setVerbose(true) was called, which this
@@ -315,6 +322,50 @@ describe("ateam-conductor", () => {
 
       expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining("codex-skipped=59"));
       consoleLogSpy.mockRestore();
+    });
+
+    it("logs each stdout line as its own info call, without a prefix or collapsed whitespace", () => {
+      mockedSpawn.mockReturnValueOnce(
+        spawnResult({ stdout: "reap: remove worktree /a/b\nreap:   indented  detail   \n\nreap: scan summary — review=2\n" }),
+      );
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      reapClosedReviews(makeConfig());
+
+      const lines = consoleLogSpy.mock.calls.map((c) => c[0] as string);
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toMatch(/INFO {2}\[conductor\] reap: remove worktree \/a\/b$/);
+      expect(lines[1]).toMatch(/\[conductor\] reap:   indented  detail$/);
+      expect(lines[2]).toMatch(/\[conductor\] reap: scan summary — review=2$/);
+      consoleLogSpy.mockRestore();
+    });
+
+    it("logs stderr lines at warn level when reap exits 0", () => {
+      mockedSpawn.mockReturnValueOnce(
+        spawnResult({ stdout: "reap: scan summary — worktrees-failed=2\n", stderr: "reap: remove worktree /a/b: busy\nreap: remove worktree /c/d: denied\n" }),
+      );
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      reapClosedReviews(makeConfig());
+
+      const warns = consoleErrSpy.mock.calls.map((c) => c[0] as string);
+      expect(warns).toHaveLength(2);
+      expect(warns[0]).toMatch(/WARN {2}\[conductor\] reap: remove worktree \/a\/b: busy$/);
+      expect(warns[1]).toMatch(/WARN {2}\[conductor\] reap: remove worktree \/c\/d: denied$/);
+      expect(consoleLogSpy).toHaveBeenCalledTimes(1);
+      consoleLogSpy.mockRestore();
+      consoleErrSpy.mockRestore();
+    });
+
+    it("logs an error with captured stderr on non-zero exit", () => {
+      mockedSpawn.mockReturnValueOnce(spawnResult({ status: 1, stderr: "boom" }));
+      const consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      reapClosedReviews(makeConfig());
+
+      expect(consoleErrSpy).toHaveBeenCalledWith(expect.stringMatching(/ERROR \[conductor\] ateam reap failed: .*exit 1\)\nboom/));
+      consoleErrSpy.mockRestore();
     });
   });
 });

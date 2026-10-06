@@ -1,7 +1,7 @@
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createLogger } from "./log.js";
 import type { ShepherdConfig } from "./types.js";
 
@@ -134,14 +134,27 @@ export function reapClosedReviews(config: ShepherdConfig): void {
     // every time; 90s gives one removal comfortable headroom. ateam's own scan
     // deadline still caps how many it starts per tick, so this bounds a stall,
     // not steady-state throughput.
-    const output = execFileSync(ateam, ["reap"], { encoding: "utf-8", timeout: 90_000, stdio: ["pipe", "pipe", "pipe"] });
-    if (output && output.trim()) {
-      log.info(`reap stdout: ${output.trim().replace(/\s+/g, " ")}`);
+    // spawnSync, not execFileSync: execFileSync returns only stdout on success,
+    // and reap reports per-item failures on stderr while still exiting 0.
+    const result = spawnSync(ateam, ["reap"], { encoding: "utf-8", timeout: 90_000, stdio: ["pipe", "pipe", "pipe"] });
+    if (result.error || result.status !== 0) {
+      const reason = result.error
+        ? result.error.message
+        : `Command failed: ${ateam} reap (${result.signal ? `signal ${result.signal}` : `exit ${result.status}`})`;
+      const captured = [result.stderr, result.stdout].filter(Boolean).join("\n").trim().slice(0, 500);
+      log.error(`ateam reap failed: ${reason}${captured ? `\n${captured}` : ""}`);
+      return;
     }
+    for (const line of splitLines(result.stdout)) log.info(line);
+    for (const line of splitLines(result.stderr)) log.warn(line);
     log.debug(`reap exited successfully`);
   } catch (err) {
     const error = err as Error & { stdout?: string; stderr?: string };
     const captured = [error.stderr, error.stdout].filter(Boolean).join("\n").trim().slice(0, 500);
     log.error(`ateam reap failed: ${error.message}${captured ? `\n${captured}` : ""}`);
   }
+}
+
+function splitLines(text: string | null | undefined): string[] {
+  return (text ?? "").split("\n").map((l) => l.trimEnd()).filter(Boolean);
 }
