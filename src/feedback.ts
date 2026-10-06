@@ -16,26 +16,43 @@ const log = createLogger("feedback");
 
 type SenderRole = "reviewer" | "bot";
 
-// Who gets forwarded: the reviews.reviewerUsers allowlist (humans) and the
-// reviews.botUsers list (bots). Everyone else, including the PR author's own
-// identity, is not forwarded. Matching is case-insensitive.
+function isAuthor(author: string, config: ShepherdConfig): boolean {
+  return !!config.github.authorUsername && author.toLowerCase() === config.github.authorUsername.toLowerCase();
+}
+
+// List membership for comment senders: the reviews.reviewerUsers allowlist
+// (humans) and the reviews.botUsers list (bots). The PR author's own identity
+// is never a sender. Matching is case-insensitive.
 export function feedbackSenderRole(author: string, config: ShepherdConfig): SenderRole | null {
+  if (isAuthor(author, config)) return null;
   const a = author.toLowerCase();
-  if (config.github.authorUsername && a === config.github.authorUsername.toLowerCase()) return null;
   if (config.reviews.botUsers.some((u) => u.toLowerCase() === a)) return "bot";
   if (config.reviews.reviewerUsers.some((u) => u.toLowerCase() === a)) return "reviewer";
   return null;
 }
 
-// Sender filter plus content gates, applied the same way to every surface.
-// Listed bots only count when their body carries an actionable finding (❌).
-// The bot attempt cap is applied separately, in forwardFeedback, because it
-// depends on per-PR state.
+// True when the listed-bot attempt cap governs this item: a comment or inline
+// comment from a botUsers sender. Formal reviews are never capped.
+export function isCappedBotFeedback(item: Pick<FeedbackItem, "kind" | "author">, config: ShepherdConfig): boolean {
+  return item.kind !== "review" && feedbackSenderRole(item.author, config) === "bot";
+}
+
+// The sender filter, split by surface:
+// - Formal reviews (any verdict) with a non-empty body are forwarded from any
+//   sender except the PR author. A formal review is a deliberate act, so it
+//   is never list-gated, ❌-gated, or capped.
+// - PR comments and inline comments are forwarded from reviews.reviewerUsers,
+//   and from reviews.botUsers only when the body carries an actionable
+//   finding (❌). The bot attempt cap is applied in forwardFeedback because it
+//   depends on per-PR state.
+// Reply-watch uses this same predicate (with kind "inline") to drop the
+// replies this forwarder owns.
 export function isForwardableFeedback(
-  item: { author: string; body: string },
+  item: Pick<FeedbackItem, "kind" | "author" | "body">,
   config: ShepherdConfig,
 ): boolean {
   if (item.body.trim().length === 0) return false;
+  if (item.kind === "review") return !isAuthor(item.author, config);
   const role = feedbackSenderRole(item.author, config);
   if (role === "reviewer") return true;
   if (role === "bot") return /❌/.test(item.body);
@@ -87,7 +104,7 @@ export function formatFeedbackMessage(
 ): string {
   const attempt = `bot feedback attempt ${pr.botFeedbackCount + 1}/${config.botFeedback.maxAttempts}`;
   const blocks = items.map((item) => {
-    const bot = feedbackSenderRole(item.author, config) === "bot" ? `, ${attempt}` : "";
+    const bot = isCappedBotFeedback(item, config) ? `, ${attempt}` : "";
     return [`### ${feedbackLabel(item)} (${item.createdAt}${bot})`, "", item.body.trim()].join("\n");
   });
   const [owner, name] = pr.repo.split("/");
@@ -125,7 +142,7 @@ export async function forwardFeedback(config: ShepherdConfig, pr: WatchedPR): Pr
   const seenSet = new Set(seen);
   const botCapped = pr.botFeedbackCount >= config.botFeedback.maxAttempts;
   const fresh = items.filter(
-    (i) => !seenSet.has(i.key) && !(botCapped && feedbackSenderRole(i.author, config) === "bot"),
+    (i) => !seenSet.has(i.key) && !(botCapped && isCappedBotFeedback(i, config)),
   );
 
   const persistSeen = (keys: string[]) => {
@@ -145,7 +162,7 @@ export async function forwardFeedback(config: ShepherdConfig, pr: WatchedPR): Pr
     return fresh.length;
   }
 
-  const hasBot = fresh.some((i) => feedbackSenderRole(i.author, config) === "bot");
+  const hasBot = fresh.some((i) => isCappedBotFeedback(i, config));
   const msg = formatFeedbackMessage(pr, fresh, config);
   const delivered = await sendToAgent(config, config.notifications.notifyAgent!, msg);
   if (!delivered) {

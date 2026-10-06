@@ -48,11 +48,23 @@ describe("feedback sender filter", () => {
     expect(feedbackSenderRole("ErLloyd", c)).toBeNull();
   });
 
-  it("gates listed bots on ❌ and drops empty bodies", () => {
-    expect(isForwardableFeedback({ author: "mgt-canary[bot]", body: "all good" }, config)).toBe(false);
-    expect(isForwardableFeedback({ author: "mgt-canary[bot]", body: "❌ missing guard" }, config)).toBe(true);
-    expect(isForwardableFeedback({ author: "jbarneson", body: "   \n " }, config)).toBe(false);
-    expect(isForwardableFeedback({ author: "jbarneson", body: "nit" }, config)).toBe(true);
+  it("comments: gates listed bots on ❌, excludes unlisted senders, drops empty bodies", () => {
+    for (const kind of ["comment", "inline"] as const) {
+      expect(isForwardableFeedback({ kind, author: "mgt-canary[bot]", body: "all good" }, config)).toBe(false);
+      expect(isForwardableFeedback({ kind, author: "mgt-canary[bot]", body: "❌ missing guard" }, config)).toBe(true);
+      expect(isForwardableFeedback({ kind, author: "stranger", body: "drive-by" }, config)).toBe(false);
+      expect(isForwardableFeedback({ kind, author: "jbarneson", body: "   \n " }, config)).toBe(false);
+      expect(isForwardableFeedback({ kind, author: "jbarneson", body: "nit" }, config)).toBe(true);
+    }
+  });
+
+  it("formal reviews: any sender except the author, no list or ❌ gate", () => {
+    const kind = "review" as const;
+    expect(isForwardableFeedback({ kind, author: "stranger", body: "body" }, config)).toBe(true);
+    expect(isForwardableFeedback({ kind, author: "copilot[bot]", body: "body" }, config)).toBe(true);
+    expect(isForwardableFeedback({ kind, author: "mgt-canary[bot]", body: "warnings, no cross" }, config)).toBe(true);
+    expect(isForwardableFeedback({ kind, author: "ErLloyd", body: "self review" }, config)).toBe(false);
+    expect(isForwardableFeedback({ kind, author: "stranger", body: "  " }, config)).toBe(false);
   });
 });
 
@@ -335,21 +347,47 @@ describe("pollAll — unified feedback forwarding", () => {
     expect(all.filter((m) => m.includes("swallows timeouts"))).toHaveLength(1);
   });
 
-  it("still transitions on a review from an unlisted sender but does not forward its body", async () => {
+  it("forwards a review body from an unlisted sender once, with a status-only transition message", async () => {
     const config = makeConfig({ dataDir: TMP });
     upsertCachedPR(TMP, cachedPR());
     world.checks = passingChecks;
     world.reviews = [review(1, "stranger", "CHANGES_REQUESTED", "unlisted body", "2026-10-01T00:00:01Z")];
 
     await pollAll(config);
+    await pollAll(config);
 
     expect(readCache(TMP)[0].state).toBe("CHANGES_REQUESTED");
-    expect(messages()).toHaveLength(1);
-    expect(messages()[0]).toContain("Changes Requested by @stranger");
-    expect(messages()[0]).not.toContain("unlisted body");
+    const all = messages();
+    expect(all).toHaveLength(2);
+    expect(all[0]).toContain("Changes Requested by @stranger");
+    expect(all[0]).not.toContain("unlisted body");
+    expect(all[1]).toContain("CHANGES_REQUESTED review from @stranger");
+    expect(all.filter((m) => m.includes("unlisted body"))).toHaveLength(1);
   });
 
-  it("excludes the author, unlisted humans, and unlisted bots", async () => {
+  it("forwards formal reviews from unlisted humans and any bot, but not the author's own", async () => {
+    const config = makeConfig({ dataDir: TMP });
+    upsertCachedPR(TMP, cachedPR());
+    world.reviews = [
+      review(1, "stranger", "COMMENTED", "stranger review", "2026-10-01T00:00:01Z"),
+      review(2, "copilot[bot]", "COMMENTED", "unlisted bot review", "2026-10-01T00:00:02Z"),
+      review(3, "mgt-canary[bot]", "APPROVED", "Approved with warnings: no tests for the error path.", "2026-10-01T00:00:03Z"),
+      review(4, "erlloyd", "COMMENTED", "author self-review", "2026-10-01T00:00:04Z"),
+    ];
+
+    await pollAll(config);
+
+    const [msg] = feedbackMessages();
+    expect(msg).toContain("stranger review");
+    expect(msg).toContain("unlisted bot review");
+    expect(msg).toContain("APPROVED review from @mgt-canary[bot]");
+    expect(msg).not.toContain("bot feedback attempt");
+    expect(msg).not.toContain("author self-review");
+    // A formal review from a listed bot does not consume the bot attempt cap.
+    expect(readCache(TMP)[0].botFeedbackCount).toBe(0);
+  });
+
+  it("excludes comments from the author, unlisted humans, and unlisted bots", async () => {
     const config = makeConfig({ dataDir: TMP });
     upsertCachedPR(TMP, cachedPR());
     world.comments = [
@@ -357,36 +395,44 @@ describe("pollAll — unified feedback forwarding", () => {
       comment(2, "vercel[bot]", "preview ready", "2026-10-01T00:00:02Z"),
       comment(3, "stranger", "drive-by", "2026-10-01T00:00:03Z"),
     ];
-    world.inline = [inline(4, "erlloyd", "author reply", "2026-10-01T00:00:04Z")];
+    world.inline = [
+      inline(4, "erlloyd", "author reply", "2026-10-01T00:00:04Z"),
+      inline(5, "stranger", "unlisted inline", "2026-10-01T00:00:05Z"),
+    ];
 
     await pollAll(config);
 
     expect(feedbackMessages()).toHaveLength(0);
   });
 
-  it("forwards a listed bot only with ❌, on any surface, and honors the attempt cap", async () => {
+  it("forwards a listed bot's comments only with ❌, on both comment surfaces, and honors the attempt cap", async () => {
     const config = makeConfig({ dataDir: TMP, botFeedback: { maxAttempts: 1 } });
     upsertCachedPR(TMP, cachedPR());
-    world.comments = [comment(1, "mgt-canary[bot]", "Summary: all good", "2026-10-01T00:00:01Z")];
-    world.reviews = [review(2, "mgt-canary[bot]", "COMMENTED", "❌ unchecked null", "2026-10-01T00:00:02Z")];
+    world.comments = [
+      comment(1, "mgt-canary[bot]", "Summary: all good", "2026-10-01T00:00:01Z"),
+      comment(2, "mgt-canary[bot]", "❌ unchecked null", "2026-10-01T00:00:02Z"),
+    ];
 
     await pollAll(config);
 
     expect(feedbackMessages()).toHaveLength(1);
-    expect(feedbackMessages()[0]).toContain("COMMENTED review from @mgt-canary[bot]");
+    expect(feedbackMessages()[0]).toContain("comment from @mgt-canary[bot]");
     expect(feedbackMessages()[0]).toContain("bot feedback attempt 1/1");
     expect(feedbackMessages()[0]).not.toContain("all good");
     expect(readCache(TMP)[0].botFeedbackCount).toBe(1);
 
-    // Cap reached: a new ❌ finding is dropped, a listed human still flows.
+    // Cap reached: a new ❌ inline finding is dropped; a listed human and a
+    // formal review from the same bot still flow.
     world.inline = [
       inline(3, "mgt-canary[bot]", "❌ another", "2026-10-01T00:00:03Z"),
       inline(4, "ian", "human note", "2026-10-01T00:00:04Z"),
     ];
+    world.reviews = [review(5, "mgt-canary[bot]", "COMMENTED", "❌ review finding", "2026-10-01T00:00:05Z")];
     await pollAll(config);
 
     expect(feedbackMessages()).toHaveLength(2);
     expect(feedbackMessages()[1]).toContain("human note");
+    expect(feedbackMessages()[1]).toContain("review finding");
     expect(feedbackMessages()[1]).not.toContain("another");
   });
 

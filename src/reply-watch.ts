@@ -208,7 +208,7 @@ export async function pollReplyWatch(config: ShepherdConfig): Promise<number | n
         // The unified feedback forwarder owns these replies on authored PRs;
         // forwarding them here too would deliver them twice.
         if (target.authored) {
-          replies = replies.filter((r) => !isForwardableFeedback(r, config));
+          replies = replies.filter((r) => !isForwardableFeedback({ ...r, kind: "inline" }, config));
           if (replies.length === 0) continue;
         }
 

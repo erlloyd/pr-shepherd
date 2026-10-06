@@ -44,8 +44,8 @@ export type WatchedPR = {
   headSha: string | null;
   lastCheckedAt: string | null;
   lastEventAt: string | null;
-  // Number of forwards that carried listed-bot feedback; capped at
-  // botFeedback.maxAttempts.
+  // Number of forwards that carried a listed bot's comment or inline comment
+  // (formal reviews do not count); capped at botFeedback.maxAttempts.
   botFeedbackCount: number;
   // Keys (FeedbackItem.key) of every feedback item already forwarded or
   // deliberately skipped at rollout. Absent on cache entries written before
