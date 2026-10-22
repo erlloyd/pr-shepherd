@@ -58,6 +58,22 @@ describe("github", () => {
       expect(checks[0].bucket).toBe("pass");
     });
 
+    it("keeps only the latest run per workflow and check name", () => {
+      // A re-run on the same commit leaves the superseded run in the rollup.
+      // The stale cancelled run must not keep the PR in CI_FAILED.
+      const raw = [
+        { name: "Deploy to Staging", state: "CANCELLED", bucket: "cancel", workflow: "Deploy", startedAt: "2026-10-22T19:33:29Z" },
+        { name: "Deploy to Staging", state: "SUCCESS", bucket: "pass", workflow: "Deploy", startedAt: "2026-10-22T19:33:33Z" },
+        { name: "Deploy to Staging", state: "SUCCESS", bucket: "pass", workflow: "Deploy", startedAt: "2026-10-22T19:33:31Z" },
+        { name: "Deploy to Staging", state: "FAILURE", bucket: "fail", workflow: "Other", startedAt: "2026-10-22T19:33:30Z" },
+      ];
+      const checks = parseChecks(raw, makeConfig());
+      expect(checks).toHaveLength(2);
+      expect(checks.find((c) => c.workflow === "Deploy")?.bucket).toBe("pass");
+      expect(checks.find((c) => c.workflow === "Other")?.bucket).toBe("fail");
+      expect(evaluateChecks(checks, makeConfig()).failed).toEqual(["Deploy to Staging"]);
+    });
+
     it("filters out ignored checks", () => {
       const raw = loadFixture<Array<{ name: string; state: string; bucket: string; workflow: string }>>(
         "checks-passed.json",

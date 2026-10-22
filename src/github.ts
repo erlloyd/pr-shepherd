@@ -6,6 +6,7 @@ type RawCheck = {
   state: string;
   bucket: string;
   workflow: string;
+  startedAt?: string;
 };
 
 type RawReview = {
@@ -65,7 +66,7 @@ export function fetchChecks(number: number, repo: string): RawCheck[] {
       "-R",
       repo,
       "--json",
-      "name,state,bucket,workflow",
+      "name,state,bucket,workflow,startedAt",
     ]);
     return JSON.parse(json) as RawCheck[];
   } catch (err: unknown) {
@@ -344,14 +345,22 @@ export function parseChecks(
   rawChecks: RawCheck[],
   config: ShepherdConfig,
 ): CheckStatus[] {
-  return rawChecks
-    .filter((c) => !config.checks.ignoreChecks.includes(c.name))
-    .map((c) => ({
-      name: c.name,
-      state: c.state,
-      bucket: c.bucket as CheckStatus["bucket"],
-      workflow: c.workflow,
-    }));
+  // The rollup lists every run on the head commit, so a re-run leaves its
+  // superseded run (often cancelled) alongside the new one. Keep only the
+  // latest run per workflow+name so a stale run can't fail the PR.
+  const latest = new Map<string, RawCheck>();
+  for (const c of rawChecks) {
+    if (config.checks.ignoreChecks.includes(c.name)) continue;
+    const key = `${c.workflow}\u0000${c.name}`;
+    const prev = latest.get(key);
+    if (!prev || (c.startedAt ?? "") >= (prev.startedAt ?? "")) latest.set(key, c);
+  }
+  return [...latest.values()].map((c) => ({
+    name: c.name,
+    state: c.state,
+    bucket: c.bucket as CheckStatus["bucket"],
+    workflow: c.workflow,
+  }));
 }
 
 export function parseReviews(
