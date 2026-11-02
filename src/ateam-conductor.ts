@@ -96,7 +96,12 @@ export function routeToAgent(
 
     log.debug(`exec: ${ateam} ${args.join(" ")}`);
 
-    const output = execFileSync(ateam, args, { encoding: "utf-8", timeout: 30_000, stdio: ["pipe", "pipe", "pipe"] });
+    // 90s, not 30s: when the recipient session is idle, `ateam mail send`
+    // waits 30s (deafProbeWait) for its watcher to consume the doorbell before
+    // it decides whether to respawn. That wait plus the bd and gh calls runs
+    // past 30s, so a 30s limit kills every delivery to an idle recipient after
+    // the message is stored but before the respawn check.
+    const output = execFileSync(ateam, args, { encoding: "utf-8", timeout: 90_000, stdio: ["pipe", "pipe", "pipe"] });
     if (output && output.trim()) {
       log.debug(`route-pr-event stdout: ${output.trim().replace(/\s+/g, " ").slice(0, 200)}`);
     }
